@@ -26,6 +26,14 @@ All apps are built on the `golusoris` framework and live here with the `app-` pr
 
 The namesake repo `golusoris/golusoris` is the framework itself.
 
-## Funding
+## Support
 
-If any of this saves you time, tips welcome via [Ko-fi ☕](https://ko-fi.com/lusoris) or [GitHub Sponsors](https://github.com/sponsors/lusoris).
+<p align="left">
+  <a href="https://ko-fi.com/lusoris" target="_blank">
+    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://github.com/sponsors/lusoris" target="_blank">
+    <img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Sponsors" />
+  </a>
+</p>
