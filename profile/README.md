@@ -1,32 +1,31 @@
 # golusoris
 
-A composable Go framework — opt-in `fx` modules for everything a production backend needs.
+Foundational Go libraries + the apps built on top of them.
 
-```go
-import "github.com/golusoris/golusoris"
+## What's here
 
-fx.New(
-    golusoris.Core,            // config + log + clock + id + validate + crypto
-    golusoris.DB,              // pgx pool + migrations + sqlc helpers
-    golusoris.HTTP,            // server + middleware + Scalar API docs
-    golusoris.OTel,            // tracer + meter + logs + OTLP
-    golusoris.Auth.OIDC,
-    golusoris.Jobs,            // river queue
-    golusoris.Cache.Memory,
-    golusoris.K8s.Health,      // /livez /readyz /startupz
-    // ... pick what you need
-).Run()
-```
+### Libraries
+- **[golusoris/golusoris](https://github.com/golusoris/golusoris)** — the framework: composable `fx` modules covering config, logging, errors, database, HTTP, OTel, jobs, cache, auth, k8s runtime, notifications, storage, AI, and more.
+- **[golusoris/goenvoy](https://github.com/golusoris/goenvoy)** — typed clients for the *arr stack, metadata services (TMDB, AniList, Trakt, …), and download/indexer APIs. 60+ zero-dependency modules.
 
-## Repositories
+### Apps
+All apps are built on the `golusoris` framework and live here with the `app-` prefix:
 
-- **[golusoris/golusoris](https://github.com/golusoris/golusoris)** — the framework
-- **[golusoris/goenvoy](https://github.com/golusoris/goenvoy)** — typed clients for arr-stack, TMDB, AniList, Trakt, etc.
+- **[app-revenge](https://github.com/golusoris/app-revenge)** — high-performance Go media server
+- **[app-lurkarr](https://github.com/golusoris/app-lurkarr)** — automated media hunting for *arr apps
+- **[app-subdo](https://github.com/golusoris/app-subdo)** — visual flow editor for media processing automation
+- **[app-arca](https://github.com/golusoris/app-arca)** — self-hosted ROM management platform
 
-## Apps built on golusoris
+## Naming convention
 
-- [lusoris/revenge](https://github.com/lusoris/revenge), [lusoris/lurkarr](https://github.com/lusoris/lurkarr), [lusoris/subdo](https://github.com/lusoris/subdo), [lusoris/arca](https://github.com/lusoris/arca)
+| Prefix | Kind | Example |
+|---|---|---|
+| none | library | `golusoris/goenvoy` |
+| `app-` | application consuming the framework | `golusoris/app-revenge` |
+| `cmd-` | standalone CLI (future) | `golusoris/cmd-…` |
+
+The namesake repo `golusoris/golusoris` is the framework itself.
 
 ## Funding
 
-If golusoris saves you time, consider supporting on [Ko-fi ☕](https://ko-fi.com/lusoris) or [GitHub Sponsors](https://github.com/sponsors/lusoris).
+If any of this saves you time, tips welcome via [Ko-fi ☕](https://ko-fi.com/lusoris) or [GitHub Sponsors](https://github.com/sponsors/lusoris).
