@@ -1,0 +1,43 @@
+# Reusable workflow: syncs labels in the calling repo from
+# golusoris/.github/labels.yml. Repos call this from their own workflow.
+#
+#   # .github/workflows/labels.yml in any golusoris repo:
+#   on:
+#     push:
+#       branches: [main]
+#       paths: ['.github/workflows/labels.yml']
+#     workflow_dispatch:
+#   jobs:
+#     sync:
+#       uses: golusoris/.github/.github/workflows/sync-labels.yml@main
+
+name: sync-labels (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      delete-other-labels:
+        description: "Remove labels not present in source"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch source labels
+        run: |
+          curl -sSL https://raw.githubusercontent.com/golusoris/.github/main/labels.yml > labels.yml
+          ls -la labels.yml
+
+      - name: Sync labels
+        uses: EndBug/label-sync@v2
+        with:
+          config-file: labels.yml
+          delete-other-labels: ${{ inputs.delete-other-labels }}
