@@ -1,0 +1,21 @@
+# REUSE (https://reuse.software) annotations; later tables win for files
+# matched by more than one table (REUSE specification 3.3). Full licence
+# texts live under LICENSES/. Run `reuse lint` to verify compliance.
+version = 1
+SPDX-PackageName = "golusoris/.github"
+SPDX-PackageSupplier = "lusoris <lusoris@pm.me>"
+SPDX-PackageDownloadLocation = "https://github.com/golusoris/.github"
+
+# Workflows, label set, funding and bot configuration
+[[annotations]]
+path = ["**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 lusoris <lusoris@pm.me>"
+SPDX-License-Identifier = "EUPL-1.2"
+
+# Prose: organisation profile and community health files
+[[annotations]]
+path = ["**/*.md"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 lusoris <lusoris@pm.me>"
+SPDX-License-Identifier = "CC-BY-SA-4.0"
