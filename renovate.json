@@ -6,7 +6,21 @@
     ":dependencyDashboard",
     ":semanticCommits"
   ],
-  "labels": ["dependencies"],
+  "labels": [
+    "dependencies"
+  ],
   "prConcurrentLimit": 5,
-  "minimumReleaseAge": "3 days"
+  "minimumReleaseAge": "3 days",
+  "packageRules": [
+    {
+      "description": "praetor-managed files: praetorctl adopt ships their updates and praetorctl audit locks them byte for byte",
+      "matchFileNames": [
+        ".devcontainer/devcontainer.json",
+        ".devcontainer/Dockerfile.praetor",
+        ".github/workflows/reuse.yml",
+        ".config/reuse/requirements.txt"
+      ],
+      "enabled": false
+    }
+  ]
 }
