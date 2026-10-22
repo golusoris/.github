@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-22T09:01:59Z",
+  "repository": "golusoris/.github",
+  "commit_sha": "7e8dce1625fb63a385e4162a9023ce1b3ed8022d",
+  "total_infractions": 1,
+  "infractions": [
+    {
+      "rule_id": "HISS-02",
+      "file_path": ".github/workflows/sync-labels.yml",
+      "line_number": 37,
+      "message": "curl without --max-time waits on the network without a deadline",
+      "anchor": "text:70e2f10e4b65",
+      "fingerprint": ".github/workflows/sync-labels.yml:HISS-02:text:70e2f10e4b65#1"
+    }
+  ]
+}
