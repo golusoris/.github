@@ -7,6 +7,13 @@ repository:
   description: ""
   homepage: ""
   topics: []
+# Organisation community health files (CONTRIBUTING, pull request template, security policy) stay as the
+# organisation wrote them; adoption writes none of them here (answer praetor-adoption-dotgithub).
+adoption:
+  decline:
+    - contributing
+    - pull-request-template
+    - security-policy
 profiles:
   - template-seed
 facets:
