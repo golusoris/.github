@@ -6,6 +6,10 @@ Organisation-wide community health files and the public organisation profile
 for [golusoris](https://github.com/golusoris). The profile page itself lives in
 [`profile/README.md`](profile/README.md).
 
+Local checks: `make verify-all` runs the full gate; `make audit` and
+`make compile-context-verify` run its parts. The Makefile uses `praetorctl` or
+`standardsctl`, whichever is installed.
+
 <!-- praetor:readme-governance:start -->
 ![HISS Adopted][praetor-hiss-badge]
 
