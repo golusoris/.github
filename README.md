@@ -11,7 +11,7 @@ Local checks: `make verify-all` runs the full gate; `make audit` and
 `standardsctl`, whichever is installed.
 
 <!-- praetor:readme-governance:start -->
-![HISS Adopted][praetor-hiss-badge]
+[![HISS Adopted][praetor-hiss-badge]][praetor-hiss-agents]
 
 Praetor manages this repository's declared governance policy. This managed
 block records adoption state; it is not a verification certificate.
@@ -29,4 +29,5 @@ generated agent context against `AGENTS.md`.
 1 recorded infraction; audit forbids growth.
 
 [praetor-hiss-badge]: https://img.shields.io/badge/Standards-HISS%20Adopted%20(1%20baselined)-yellow
+[praetor-hiss-agents]: https://github.com/golusoris/.github/blob/HEAD/AGENTS.md
 <!-- praetor:readme-governance:end -->
