@@ -96,7 +96,8 @@ High-Integrity Systems Standard (HISS) from
 [Praetor](https://github.com/cordanaLLM/praetor) in
 [`AGENTS.md`](https://github.com/golusoris/.github/blob/main/AGENTS.md). Its
 table names the check that enforces each invariant and marks the invariants
-that are advisory only. Pull request titles follow Conventional Commits, and
-commits are signed with a `Signed-off-by` trailer, as
+that are advisory only. Pull request titles follow Conventional Commits. Every
+commit carries a cryptographic signature (`git commit -S`) and, separately, a
+`Signed-off-by` trailer (`git commit -s`), as
 [`CONTRIBUTING.md`](https://github.com/golusoris/.github/blob/main/CONTRIBUTING.md)
 describes.
