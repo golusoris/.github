@@ -3,7 +3,8 @@
 -include .config/praetor/engine.mk
 # Praetor ships one binary under two names; resolve whichever is installed.
 PRAETORCTL ?= $(shell command -v praetorctl 2>/dev/null || command -v standardsctl 2>/dev/null || echo praetorctl)
-# The suite needs Python 3.10 or later with PyYAML (.config/tests/requirements.txt).
+# The suite needs Python 3.10 or later with PyYAML and markdown-it-py
+# (.config/tests/requirements.txt).
 PYTHON ?= python3
 .PHONY: all verify-all compile-context compile-context-verify caveman-sources audit build test
 
