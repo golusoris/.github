@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 lusoris <lusoris@pm.me>
+#
+# SPDX-License-Identifier: EUPL-1.2
+
+# Test-suite dependency: tests/ parse labels.yml with PyYAML.
+PyYAML
+
+# Test-suite dependency: tests/ parse Markdown links with markdown-it-py.
+markdown-it-py
