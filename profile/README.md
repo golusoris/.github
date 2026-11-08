@@ -23,14 +23,17 @@
 
   **Foundational Go libraries and the applications built on top of them**
 
-  *The central framework modules, service clients, and self-hosted apps of the golusoris ecosystem*
+  *The central [framework modules](https://github.com/golusoris/golusoris), [service clients](https://github.com/golusoris/goenvoy), and self-hosted apps of the golusoris ecosystem*
 
 </div>
 
 golusoris provides foundational Go libraries and the suite of applications built
-on top of them. It encompasses composable `fx` framework modules covering core
-backend infrastructure, zero-dependency typed clients for media automation and
-metadata services, and production self-hosted applications.
+on top of them. It encompasses [composable framework modules covering core
+backend infrastructure](https://github.com/golusoris/golusoris) using Uber's
+[`fx`](https://github.com/uber-go/fx) dependency-injection framework,
+[zero-dependency typed clients for media automation and metadata
+services](https://github.com/golusoris/goenvoy), and self-hosted applications
+built on both, listed under Apps.
 
 ---
 
@@ -43,12 +46,13 @@ metadata services, and production self-hosted applications.
 
 ### Apps
 
-All apps are built on the `golusoris` framework and live here with the `app-` prefix:
+All apps are built on the `golusoris` framework. Their repositories are not
+published yet; each will use the `app-` prefix here:
 
-- **[app-revenge](https://github.com/golusoris/app-revenge)** — high-performance Go media server
-- **[app-lurkarr](https://github.com/golusoris/app-lurkarr)** — automated media hunting for *arr apps
-- **[app-subdo](https://github.com/golusoris/app-subdo)** — visual flow editor for media processing automation
-- **[app-arca](https://github.com/golusoris/app-arca)** — self-hosted ROM management platform
+- **app-revenge** — high-performance Go media server
+- **app-lurkarr** — automated media hunting for *arr apps
+- **app-subdo** — visual flow editor for media processing automation
+- **app-arca** — self-hosted ROM management platform
 
 ## Naming convention
 
@@ -84,5 +88,11 @@ per [`REUSE.toml`](https://github.com/golusoris/.github/blob/main/REUSE.toml).
 
 ## Standards & Governance
 
-This repository conforms to High-Integrity Systems Standards (HISS-21)
-and Conventional Commits conventions.
+The `golusoris/.github` repository declares the 21 invariants of the
+High-Integrity Systems Standard (HISS) from
+[Praetor](https://github.com/cordanaLLM/praetor) in
+[`AGENTS.md`](https://github.com/golusoris/.github/blob/main/AGENTS.md). Its
+table names the check that enforces each invariant and marks the invariants
+that are advisory only. Commits follow Conventional Commits, as
+[`CONTRIBUTING.md`](https://github.com/golusoris/.github/blob/main/CONTRIBUTING.md)
+describes.
