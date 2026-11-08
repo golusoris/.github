@@ -13,7 +13,7 @@ Local checks: `make verify-all` runs the full gate; `make audit` and
 ## Tests
 
 `make test` runs the suite under [`tests/`](tests/) with Python's `unittest`.
-It needs Python 3.10 or later and PyYAML, pinned with hashes in
+It needs Python 3.10 or later, PyYAML and markdown-it-py, pinned with hashes in
 [`.config/tests/requirements.txt`](.config/tests/requirements.txt). The
 [Tests workflow](.github/workflows/test.yml) runs it on every pull request, on
 `main` and in the merge queue.

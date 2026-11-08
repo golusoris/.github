@@ -4,3 +4,6 @@
 
 # Test-suite dependency: tests/ parse labels.yml with PyYAML.
 PyYAML
+
+# Test-suite dependency: tests/ parse Markdown links with markdown-it-py.
+markdown-it-py

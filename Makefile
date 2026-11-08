@@ -24,7 +24,7 @@ audit:
 	@$(PRAETORCTL) audit
 
 test: build
-	@$(PYTHON) -B -m unittest discover -s tests -v
+	@$(PYTHON) -B -m unittest discover -s tests -t . -v
 
 build:
 	@printf '%s\n' 'build: not applicable: this repository holds organisation profile and community files only; nothing compiles.'

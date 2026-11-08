@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from repo_checks import ROOT, check_links, link_targets, markdown_files
+from .repo_checks import (
+    ROOT,
+    check_links,
+    link_targets,
+    markdown_files,
+    relative_targets,
+)
 
 
 class RepositoryLinkTest(unittest.TestCase):
@@ -13,9 +19,14 @@ class RepositoryLinkTest(unittest.TestCase):
         self.assertTrue({"README.md", "CONTRIBUTING.md", "SECURITY.md", "profile/README.md"} <= names, names)
 
     def test_every_relative_link_resolves(self):
-        for path in markdown_files():
+        files = markdown_files()
+        self.assertTrue(files)
+        total_targets = 0
+        for path in files:
+            total_targets += len(relative_targets(path))
             with self.subTest(path=path.relative_to(ROOT).as_posix()):
                 self.assertEqual(check_links(path), [])
+        self.assertGreater(total_targets, 0)
 
 
 class LinkDefectTest(unittest.TestCase):
@@ -42,11 +53,47 @@ class LinkDefectTest(unittest.TestCase):
     def test_missing_image_is_refused(self):
         self.assertEqual(self.check("![logo](logo.png)\n"), ["profile/README.md: logo.png names no file"])
 
-    def test_missing_reference_target_is_refused(self):
+    def test_missing_reference_target_is_refused_once(self):
         self.assertEqual(self.check("[x][ref]\n\n[ref]: missing.md\n"), ["profile/README.md: missing.md names no file"])
+
+    def test_unused_reference_definition_is_checked(self):
+        self.assertEqual(self.check("[ref]: missing.md\n"), ["profile/README.md: missing.md names no file"])
+
+    def test_link_in_image_alt_text_is_not_a_target(self):
+        self.assertEqual(link_targets("![a [b](missing.md)](banner.svg)\n"), ["banner.svg"])
 
     def test_root_relative_target_resolves_from_the_root(self):
         self.assertEqual(self.check("[s](/profile/SECURITY.md)\n"), ["profile/README.md: /profile/SECURITY.md names no file"])
+
+    def test_nested_image_link_checks_both_targets(self):
+        self.assertEqual(self.check("[![b](banner.svg)](missing.md)\n"), ["profile/README.md: missing.md names no file"])
+
+    def test_angle_bracket_target_with_space(self):
+        self.assertEqual(self.check("[x](<a b.md>)\n"), ["profile/README.md: a%20b.md names no file"])
+        (self.root / "profile" / "a b.md").write_text("# A B\n", encoding="utf-8")
+        self.assertEqual(self.check("[x](<a b.md>)\n"), [])
+
+    def test_link_titles_in_quotes_or_parentheses_are_refused_when_missing(self):
+        self.assertEqual(self.check("[x](missing.md 'title')\n"), ["profile/README.md: missing.md names no file"])
+        self.assertEqual(self.check("[x](missing.md (title))\n"), ["profile/README.md: missing.md names no file"])
+
+    def test_reference_definition_with_angle_bracket_space(self):
+        (self.root / "profile" / "a b.md").write_text("# A B\n", encoding="utf-8")
+        self.assertEqual(self.check("[ref]: <a b.md>\n"), [])
+
+    def test_inline_code_followed_by_real_fence(self):
+        text = "```code``` and [x](missing.md)\n\n```\nfence\n```\n"
+        self.assertEqual(self.check(text), ["profile/README.md: missing.md names no file"])
+
+    def test_target_resolution_and_escape(self):
+        (self.root.parent / "outside.md").write_text("# Outside\n", encoding="utf-8")
+        self.assertEqual(self.check("[x](?query) [y](/#anchor)\n"), [])
+        self.assertEqual(self.check("[p](//example.org/x)\n"), [])
+        self.assertEqual(self.check("[u](../../outside.md)\n"), ["profile/README.md: ../../outside.md leaves the repository"])
+
+    def test_url_encoded_target_passes_when_file_exists(self):
+        (self.root / "profile" / "a b.md").write_text("# A B\n", encoding="utf-8")
+        self.assertEqual(self.check("[s](a%20b.md)\n"), [])
 
 
 class LinkBoundaryTest(unittest.TestCase):
@@ -60,6 +107,18 @@ class LinkBoundaryTest(unittest.TestCase):
 
     def test_link_title_and_angle_brackets_are_stripped(self):
         self.assertEqual(link_targets('[t](<c.md>) [u](d.md "title")\n'), ["c.md", "d.md"])
+
+    def test_not_a_reference_definition(self):
+        self.assertEqual(link_targets("[note]:\nNext paragraph.\n"), [])
+
+    def test_code_fences_and_spans_contain_no_targets(self):
+        text = (
+            "   ```\n   [x](missing.md)\n   ```\n\n"
+            "````\n```\n[y](missing.md)\n```\n````\n\n"
+            "`` `[z](missing.md)` ``\n\n"
+            "`multi\n[w](missing.md)\nline`\n"
+        )
+        self.assertEqual(link_targets(text), [])
 
 
 if __name__ == "__main__":

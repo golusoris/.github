@@ -7,6 +7,9 @@ against the real repository files and against planted defects.
 
 import re
 from pathlib import Path
+from urllib.parse import unquote
+
+from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -26,10 +29,6 @@ ANSWER_KEY = re.compile(r"[a-z0-9_]+_(status|justification)")
 # Markdown files the organisation renders: the profile, the community health
 # files and the decision records.
 MARKDOWN_GLOBS = ("*.md", "profile/*.md", "docs/**/*.md")
-INLINE_LINK = re.compile(r"!?\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
-REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s+.*)?$", re.MULTILINE)
-FENCE = re.compile(r"^(```|~~~).*?^\1", re.MULTILINE | re.DOTALL)
-CODE_SPAN = re.compile(r"`[^`\n]*`")
 EXTERNAL = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
@@ -47,7 +46,7 @@ def check_label(entry, index):
     if "description" in entry and not isinstance(entry["description"], str):
         errors.append(f"entry {index}: description must be a string")
     aliases = entry.get("aliases", [])
-    if not isinstance(aliases, list) or not all(isinstance(a, str) and a for a in aliases):
+    if not isinstance(aliases, list) or not all(isinstance(a, str) and a.strip() for a in aliases):
         errors.append(f"entry {index}: aliases must be a list of non-empty strings")
     return errors
 
@@ -71,7 +70,7 @@ def check_labels(data):
         for name in label_names(entry):
             if not isinstance(name, str):
                 continue
-            key = name.casefold()
+            key = name.strip().casefold()
             if key in seen:
                 errors.append(f"entry {index}: {name!r} repeats entry {seen[key]}")
             seen.setdefault(key, index)
@@ -97,20 +96,51 @@ def check_answers(data):
 
 
 def link_targets(text):
-    """Return the link and image targets of a Markdown text, code excluded."""
-    prose = CODE_SPAN.sub("", FENCE.sub("", text))
-    return INLINE_LINK.findall(prose) + REFERENCE_LINK.findall(prose)
+    """Return the link and image targets of a Markdown text, code excluded.
+
+    Each target appears once, in document order, followed by the targets of
+    reference definitions no link uses. Raw HTML is left unchecked.
+    """
+    env = {}
+    tokens = MarkdownIt("commonmark").enable("table").parse(text, env)
+    targets = []
+    # Links and images sit only in the children of inline tokens; an image's
+    # own children are its alt text, which renders as plain text.
+    for block in tokens:
+        for token in block.children or []:
+            if token.type == "link_open":
+                targets.append(token.attrGet("href"))
+            elif token.type == "image":
+                targets.append(token.attrGet("src"))
+    references = env.get("references", {})
+    targets.extend(references[label].get("href") for label in sorted(references))
+    return [target for target in dict.fromkeys(targets) if target is not None]
+
+
+def relative_targets(path):
+    """Return the relative link targets in the Markdown file at path."""
+    targets = []
+    for target in link_targets(path.read_text(encoding="utf-8")):
+        if target.startswith("//") or EXTERNAL.match(target):
+            continue
+        local = target.split("#", 1)[0].split("?", 1)[0]
+        if not local:
+            continue
+        targets.append(target)
+    return targets
 
 
 def check_links(path, root=ROOT):
     """Return the relative link targets in path that name no file in root."""
     errors = []
-    for target in link_targets(path.read_text(encoding="utf-8")):
-        if target.startswith("#") or EXTERNAL.match(target):
-            continue
+    for target in relative_targets(path):
         local = target.split("#", 1)[0].split("?", 1)[0]
-        base = root if local.startswith("/") else path.parent
-        if not (base / local.lstrip("/")).exists():
+        unquoted = unquote(local)
+        base = root if unquoted.startswith("/") else path.parent
+        target_path = (base / unquoted.lstrip("/")).resolve()
+        if not target_path.is_relative_to(root.resolve()):
+            errors.append(f"{path.relative_to(root)}: {target} leaves the repository")
+        elif not target_path.exists():
             errors.append(f"{path.relative_to(root)}: {target} names no file")
     return errors
 

@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from repo_checks import ROOT, check_answers
+from .repo_checks import ROOT, check_answers
 
 # Criteria a passing badge needs Met (or N/A where the criterion allows it)
 # that this repository answers with its own test suite and policy.

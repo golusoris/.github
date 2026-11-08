@@ -4,7 +4,7 @@ import unittest
 
 import yaml
 
-from repo_checks import ROOT, check_labels
+from .repo_checks import ROOT, check_labels
 
 
 def label(name="type:feat", color="0e8a16", **extra):
@@ -51,8 +51,14 @@ class LabelDefectTest(unittest.TestCase):
     def test_string_aliases_are_refused(self):
         self.assertRefused([label(aliases="bug")], "aliases must be")
 
+    def test_blank_alias_is_refused(self):
+        self.assertRefused([label(aliases=["   "])], "aliases must be")
+
     def test_duplicate_name_ignores_case(self):
         self.assertRefused([label("Type:Feat"), label("type:feat")], "repeats entry 0")
+
+    def test_duplicate_name_with_trailing_whitespace_is_refused(self):
+        self.assertRefused([label("a "), label("a")], "repeats entry 0")
 
     def test_alias_colliding_with_a_name_is_refused(self):
         self.assertRefused([label("type:fix"), label("type:bug", aliases=["TYPE:FIX"])], "repeats entry 0")
