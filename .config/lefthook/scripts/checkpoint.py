@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from common import HookError, run_bounded
+from common import HookBudget, HookError, prepare_checkpoint_session, run_bounded
 
 MAX_OUTPUT = 1024 * 1024
 MAX_PATHS = 10000
@@ -570,7 +570,13 @@ def _pull_request_argv(cfg, branch=None):
     argv = ["gh", "pr", "list", "--repo", cfg["repository"], "--state", "all"]
     if branch:
         argv.extend(("--head", branch))
-    return [*argv, "--limit", "200", "--json", "headRefName,state"]
+    return [
+        *argv,
+        "--limit",
+        "200",
+        "--json",
+        "headRefName,state,headRefOid,baseRefName",
+    ]
 
 
 def _pull_request_rows(raw, kind):
@@ -582,29 +588,49 @@ def _pull_request_rows(raw, kind):
         not isinstance(row, dict)
         or not isinstance(row.get("headRefName"), str)
         or row.get("state") not in {"OPEN", "CLOSED", "MERGED"}
+        or not isinstance(row.get("headRefOid", ""), str)
+        or not isinstance(row.get("baseRefName", ""), str)
         for row in rows
     ):
         raise CheckpointError(f"pull request {kind} is malformed")
     return rows
 
 
-def _list_pull_requests(root, cfg):
-    """Return validated states from the single repository-wide PR listing."""
-    try:
-        raw = _run(
-            _pull_request_argv(cfg),
-            root,
-            network=True,
-            allowed=(0,),
-            timeout=PULL_REQUEST_TIMEOUT,
-        )
-        rows = _pull_request_rows(raw, "listing")
-        states = {}
-        for row in rows:
-            states.setdefault(row["headRefName"], set()).add(row["state"])
-    except (CheckpointError, ValueError, TypeError):
-        return {}
-    return states
+def _row_marks(row):
+    """A row's state; a merged row also names the head it carried and the base it landed on."""
+    if row["state"] != "MERGED":
+        return {row["state"]}
+    return {"MERGED", ("MERGED", row.get("headRefOid", ""), row.get("baseRefName", ""))}
+
+
+def _list_pull_requests(root, cfg, deadline):
+    """Return validated states from repository PR listing with bounded retry."""
+    last_error = ""
+    backoffs = (1, 2)
+    for attempt in range(3):
+        if time.monotonic() >= deadline:
+            break
+        try:
+            raw = _run(
+                _pull_request_argv(cfg),
+                root,
+                network=True,
+                allowed=(0,),
+                timeout=PULL_REQUEST_TIMEOUT,
+            )
+            rows = _pull_request_rows(raw, "listing")
+            states = {}
+            for row in rows:
+                states.setdefault(row["headRefName"], set()).update(_row_marks(row))
+            return states, ""
+        except (CheckpointError, ValueError, TypeError) as error:
+            last_error = str(error)
+            if attempt < len(backoffs):
+                delay = backoffs[attempt]
+                if time.monotonic() + delay > deadline:
+                    break
+                time.sleep(delay)
+    return None, last_error or "worktree check budget exhausted"
 
 
 def _probe_one_pull_request(root, cfg, branch):
@@ -617,7 +643,9 @@ def _probe_one_pull_request(root, cfg, branch):
         timeout=PULL_REQUEST_TIMEOUT,
     )
     rows = _pull_request_rows(raw, "probe")
-    return {row["state"] for row in rows if row["headRefName"] == branch}
+    return set().union(
+        *(_row_marks(row) for row in rows if row["headRefName"] == branch)
+    )
 
 
 def _probe_pull_requests(root, cfg, branches, states, deadline):
@@ -641,48 +669,106 @@ def _pull_request_states(root, cfg, branches, deadline):
     if not branches:
         return {}, ""
     if time.monotonic() >= deadline:
-        return {}, "worktree check budget exhausted"
-    states = _list_pull_requests(root, cfg)
+        return None, "worktree check budget exhausted"
+    states, error = _list_pull_requests(root, cfg, deadline)
+    if error:
+        return None, error
     return _probe_pull_requests(root, cfg, branches, states, deadline), ""
 
 
-def _is_gate_scratch(resolved, root_path):
-    """Whether resolved path lies under checkout's .standards/worktrees directory."""
+GATE_SCRATCH_RE = re.compile(r"gate-([1-9][0-9]{0,9})-[0-9]{1,20}")
+MAX_GATE_CMDLINE = 16 * 1024
+
+
+def _gate_scratch_pid(resolved, worktree_paths):
+    """Recognize a gate path beneath any listed checkout of this repository."""
+    for candidate in (resolved, *resolved.parents)[:256]:
+        match = GATE_SCRATCH_RE.fullmatch(candidate.name)
+        if match is None:
+            continue
+        parent = candidate.parent
+        if (
+            parent.name == "worktrees"
+            and parent.parent.name == ".standards"
+            and parent.parent.parent in worktree_paths
+        ):
+            return int(match[1])
+    return None
+
+
+def _live_gate_pid(pid):
+    """Require bounded /proc command identity; a reused or unreadable PID fails closed."""
     try:
-        scratch = (root_path / ".standards" / "worktrees").resolve()
-        return resolved == scratch or resolved.is_relative_to(scratch)
-    except (ValueError, AttributeError):
+        with Path(f"/proc/{pid}/cmdline").open("rb") as stream:
+            raw = stream.read(MAX_GATE_CMDLINE + 1)
+    except OSError:
         return False
+    if not raw or len(raw) > MAX_GATE_CMDLINE:
+        return False
+    argv = raw.rstrip(b"\0").split(b"\0")
+    return (
+        len(argv) >= 2
+        and Path(os.fsdecode(argv[0])).name == "praetorctl"
+        and argv[1] == b"gate"
+    )
+
+
+def _is_gate_scratch(resolved, worktree_paths):
+    """Only a scratch checkout whose owning praetorctl gate is live can be skipped."""
+    pid = _gate_scratch_pid(resolved, worktree_paths)
+    return pid is not None and _live_gate_pid(pid)
+
+
+def _existing_worktree(entry):
+    """Resolve only present checkout directories; broken paths remain unselected."""
+    try:
+        path = Path(entry.get("path", "")).resolve(strict=True)
+        return path if path.is_dir() else None
+    except (OSError, RuntimeError):
+        return None
+
+
+def _unfinished_candidate(entry, path, *, common_dir, open_text, now, owned, paths):
+    """Keep dead gate owners independently of session ownership and recent activity."""
+    if _is_gate_scratch(path, paths):
+        return False
+    pid = _gate_scratch_pid(path, paths)
+    if pid is not None:
+        entry["gate_reason"] = f"gate owner pid {pid} is not a live praetorctl gate run"
+        return True
+    if not _worktree_recent(path, common_dir, now) or (
+        owned is not None and str(path) not in owned
+    ):
+        return False
+    return not _named_worktree(open_text, entry)
 
 
 def _recent_unnamed_worktrees(root, common_dir, open_text, now, owned=None):
-    """Return bounded listed worktrees that are recent, present, and unnamed."""
+    """Select session worktrees, retaining abandoned gate scratch regardless of ownership."""
     root_path = Path(
         _git(root, "rev-parse", "--show-toplevel", timeout=WORKTREE_COMMAND_TIMEOUT)
         .decode()
         .strip()
     ).resolve()
+    entries = [(entry, _existing_worktree(entry)) for entry in _listed_worktrees(root)]
+    paths = {path for _entry, path in entries if path is not None}
     candidates = []
-    for entry in _listed_worktrees(root):
-        path = Path(entry.get("path", ""))
-        try:
-            resolved = path.resolve(strict=True)
-        except (OSError, RuntimeError):
+    for entry, resolved in entries:
+        if resolved is None or resolved == root_path:
             continue
-        if (
-            resolved == root_path
-            or entry.get("bare")
-            or entry.get("prunable")
-            or not resolved.is_dir()
-            or _is_gate_scratch(resolved, root_path)
-            or not _worktree_recent(resolved, common_dir, now)
-        ):
-            continue
-        if owned is not None and str(resolved) not in owned:
+        if entry.get("bare") or entry.get("prunable"):
             continue
         entry["path"] = str(resolved)
         entry["branch"] = entry.get("branch", "").removeprefix("refs/heads/")
-        if not _named_worktree(open_text, entry):
+        if _unfinished_candidate(
+            entry,
+            resolved,
+            common_dir=common_dir,
+            open_text=open_text,
+            now=now,
+            owned=owned,
+            paths=paths,
+        ):
             candidates.append((entry, resolved))
     return candidates
 
@@ -717,14 +803,15 @@ def _public_change_reason(path):
         return [str(error)]
 
 
-def _content_in_base(path, cfg):
+def _content_in_base(path, cfg, base=None):
     """Whether the worktree's net change since its merge base is already in the remote base.
 
     A branch that landed through a squash or a train has neither a remote copy of its commits
     nor a pull request of its own head, yet nothing of it is unfinished. Its reversed patch then
-    applies to the base. Read-only: the index lives in a temporary folder outside the repository.
+    applies to the base: the configured one, or the base a merged pull request names. Read-only:
+    the index lives in a temporary folder outside the repository.
     """
-    remote, base = cfg.get("remote") or "origin", cfg.get("base") or "main"
+    remote, base = cfg.get("remote") or "origin", base or cfg.get("base") or "main"
     base_ref = f"refs/remotes/{remote}/{base}"
     if not _remote_ref_exists(path, base_ref):
         return False
@@ -757,41 +844,75 @@ def _landed(path, cfg):
         return False
 
 
+def _landed_by_pull_request(path, cfg, marks):
+    """Whether a merged pull request carried this HEAD, or put its change into the PR's base.
+
+    Pull requests land on more bases than the configured one (an operations repository lands on
+    its role branch), and that base may since have changed the same lines, so no reversed patch
+    applies. A base name outside REF_NAME never reaches git. Fails closed like _landed.
+    """
+    merged = [mark[1:] for mark in marks if isinstance(mark, tuple)]
+    if not merged:
+        return False
+    try:
+        head = _git(path, "rev-parse", "HEAD", timeout=WORKTREE_COMMAND_TIMEOUT)
+        if head.decode().strip() in {oid for oid, _base in merged}:
+            return True
+        return any(
+            REF_NAME.fullmatch(base)
+            and ".." not in base
+            and "//" not in base
+            and _content_in_base(path, cfg, base)
+            for _oid, base in merged
+        )
+    except (CheckpointError, ValueError, OSError):
+        return False
+
+
 def _worktree_unpublished_count(path):
     """Count HEAD commits unreachable from every remote, using the canonical criterion."""
     return _rev_list_count(path, "--remotes")
 
 
 def _worktree_pr_needed(path, cfg, reasons):
-    """Check unpublished commits and base ahead; append reasons and return needs_pr."""
+    """Check unpublished commits and base ahead; append reasons and return the PR check kind.
+
+    "pushed": the branch is pushed and ahead of base, so it needs an open or merged pull
+    request. "landed": its commits are on no remote and nothing else is unfinished, so a merged
+    pull request of its head may show it landed (_landed_by_pull_request). "": no PR check.
+    """
     try:
         count = _worktree_unpublished_count(path)
     except (CheckpointError, ValueError, OSError) as error:
         reasons.append(f"commit state not verified ({error})")
-        return False
+        return ""
+    enabled = bool(cfg.get("enabled") and cfg.get("repository"))
     if count:
+        kind = "landed" if enabled and not reasons else ""
         reasons.append(f"{count} commit(s) not on any remote")
-        return False
-    if not cfg.get("enabled") or not cfg.get("repository"):
-        return False
+        return kind
+    if not enabled:
+        return ""
     try:
-        return _worktree_base_ahead(path, cfg)
+        return "pushed" if _worktree_base_ahead(path, cfg) else ""
     except (CheckpointError, ValueError, OSError) as error:
         reasons.append(f"pull request state not verified ({error})")
-        return False
+        return ""
 
 
 def _judge_worktree(root, cfg, entry, path, deadline):
-    """Return one worktree's unfinished reasons and whether its PR needs checking."""
+    """Return one worktree's unfinished reasons and the kind of PR check it needs."""
     if time.monotonic() >= deadline:
         return (
             entry,
             ["pull request state not verified (worktree check budget exhausted)"],
-            False,
+            "",
         )
     reasons = _public_change_reason(path)
+    if entry.get("gate_reason"):
+        reasons.append(entry["gate_reason"])
     if not reasons and _landed(path, cfg):
-        return entry, [], False
+        return entry, [], ""
     needs_pr = _worktree_pr_needed(path, cfg, reasons)
     return entry, reasons, needs_pr
 
@@ -831,15 +952,43 @@ def _ordered_map(fn, items):
 
 
 def _judge_worktree_candidates(root, cfg, candidates, deadline):
-    """Separate unfinished records from branches requiring bounded PR state reads."""
+    """Separate unfinished records from branches requiring bounded PR state reads.
+
+    Pushed candidates come first, so landed ones never take the three explicit-head probes a
+    pushed branch outside the listing needs; a detached HEAD names no branch to look up.
+    """
     jobs = [(cfg, entry, path, deadline) for entry, path in candidates]
     results = _ordered_map(lambda job: _judge_worktree(root, *job), jobs)
     records = [(entry, reasons) for entry, reasons, _ in results]
     pr_candidates = []
     for entry, _reasons, needs_pr in results:
-        if needs_pr:
-            pr_candidates.append((entry, _reasons))
+        if needs_pr == "pushed" or (needs_pr == "landed" and entry.get("branch")):
+            pr_candidates.append((entry, _reasons, needs_pr))
+    pr_candidates.sort(key=lambda item: item[2] != "pushed")
     return records, pr_candidates
+
+
+def _apply_pull_request_states(cfg, pr_candidates, states):
+    """Judge each candidate by its branch's PR states; return the unverified pushed count.
+
+    A landed candidate keeps its unpublished-commit reason unless a merged pull request shows
+    it landed; a failed lookup leaves that reason as it is.
+    """
+    pushed = [item for item in pr_candidates if item[2] == "pushed"]
+    if states is None:
+        return len(pushed)
+    for entry, reasons, kind in pr_candidates:
+        state = states.get(entry["branch"])
+        if kind == "landed":
+            if state and _landed_by_pull_request(Path(entry["path"]), cfg, state):
+                reasons.clear()
+        elif state is None or "UNVERIFIED" in state:
+            reasons.append("pull request state not verified")
+        elif not state.intersection({"OPEN", "MERGED"}):
+            reasons.append(
+                "pushed branch ahead of base has no open or merged pull request"
+            )
+    return 0
 
 
 def _git_common_dir(root):
@@ -859,7 +1008,7 @@ def _git_common_dir(root):
 
 
 def _unfinished_worktree_records(root, cfg):
-    """Observe only recent, unnamed linked worktrees; return records and optional skip note."""
+    """Observe recent worktrees; return records, skip note, unverified count."""
     deadline = time.monotonic() + WORKTREE_CHECK_BUDGET
     common_dir = _git_common_dir(root)
     owned = _session_owned_worktrees(common_dir)
@@ -870,26 +1019,19 @@ def _unfinished_worktree_records(root, cfg):
     states, skipped = _pull_request_states(
         root, cfg, [item[0]["branch"] for item in pr_candidates], deadline
     )
-    for entry, reasons in pr_candidates:
-        state = states.get(entry["branch"])
-        if state is None or "UNVERIFIED" in state:
-            reasons.append("pull request state not verified")
-        elif not state.intersection({"OPEN", "MERGED"}):
-            reasons.append(
-                "pushed branch ahead of base has no open or merged pull request"
-            )
+    unverified_pushed = _apply_pull_request_states(cfg, pr_candidates, states)
     unfinished = [(entry, reasons) for entry, reasons in records if reasons]
     if owned is None:
         for _entry, reasons in unfinished:
             reasons.append(OWNERSHIP_UNKNOWN_REASON)
-    return unfinished, skipped
+    return unfinished, skipped, unverified_pushed
 
 
 def _add_unfinished_worktrees(root, cfg, result):
     """Append bounded stop actions for every recent unnamed worktree with unfinished work."""
     if result.get("deferred"):
         return
-    records, skipped = _unfinished_worktree_records(root, cfg)
+    records, skipped, unverified_pushed = _unfinished_worktree_records(root, cfg)
     result["unfinished_worktrees"] = [
         {"path": item[0]["path"], "branch": item[0]["branch"], "reasons": item[1]}
         for item in records[:MAX_UNFINISHED_WORKTREES]
@@ -910,6 +1052,11 @@ def _add_unfinished_worktrees(root, cfg, result):
     if more:
         result["actions"].append(
             f"Unfinished worktrees: and {more} more; name them in .workingdir/OPEN.md"
+        )
+    if unverified_pushed:
+        result["actions"].append(
+            f"Pull request lookup failed ({skipped}): {unverified_pushed} pushed "
+            "branch(es) unverified; retry or name in .workingdir/OPEN.md"
         )
 
 
@@ -1551,6 +1698,27 @@ def inspect_checkpoint(root: Path, event: str, include_paths: bool = False) -> d
         return result
 
 
+def _prepare_native_session(args):
+    """Bridge Go to the same bounded session implementation used by the Python adapter."""
+    try:
+        raw = sys.stdin.buffer.read(MAX_OUTPUT + 1)
+        if len(raw) > MAX_OUTPUT:
+            raise ValueError("oversized checkpoint session input")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise TypeError("checkpoint session input must be an object")
+        session_hash = prepare_checkpoint_session(
+            payload, args.root.resolve(), HookBudget(5), args.event == "stop"
+        )
+        print(
+            "PRAETOR_CHECKPOINT_SESSION=" + session_hash
+        )  # caveman:not-applicable structured-protocol
+        return 0
+    except (HookError, OSError, TypeError, ValueError) as error:
+        print("checkpoint session: " + str(error)[:1000], file=sys.stderr)
+        return 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--event", choices=("tool", "stop"), required=True)
@@ -1558,7 +1726,10 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--marker", action="store_true")
     parser.add_argument("--include-paths", action="store_true")
+    parser.add_argument("--prepare-session", action="store_true")
     args = parser.parse_args(argv)
+    if args.prepare_session:
+        return _prepare_native_session(args)
     result = inspect_checkpoint(args.root.resolve(), args.event, args.include_paths)
     line = json.dumps(result, sort_keys=True)
     print(
