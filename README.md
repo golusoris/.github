@@ -10,6 +10,31 @@ Local checks: `make verify-all` runs the full gate; `make audit` and
 `make compile-context-verify` run its parts. The Makefile uses `praetorctl` or
 `standardsctl`, whichever is installed.
 
+## Tests
+
+`make test` runs the suite under [`tests/`](tests/) with Python's `unittest`.
+It needs Python 3.10 or later and PyYAML, pinned with hashes in
+[`.config/tests/requirements.txt`](.config/tests/requirements.txt). The
+[Tests workflow](.github/workflows/test.yml) runs it on every pull request, on
+`main` and in the merge queue.
+
+The suite checks what this repository publishes to the organisation:
+
+- [`labels.yml`](labels.yml) has the shape EndBug/label-sync reads, a
+  six-digit colour on every label, and no name or alias twice
+  ([`tests/test_labels.py`](tests/test_labels.py)).
+- [`.bestpractices.json`](.bestpractices.json) gives every criterion a valid
+  status and a justification
+  ([`tests/test_bestpractices.py`](tests/test_bestpractices.py)).
+- Every relative link in the profile, the community health files and the
+  decision records names a file that exists
+  ([`tests/test_markdown_links.py`](tests/test_markdown_links.py)).
+
+Test policy: a change that adds a published file, or a rule for one, adds a
+test to `tests/` in the same pull request, with a passing case, a refused
+planted defect and the boundary between them. A fix adds a test that fails
+without it.
+
 <!-- praetor:readme-governance:start -->
 [![HISS Adopted][praetor-hiss-badge]][praetor-hiss-agents]
 
