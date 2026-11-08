@@ -12,6 +12,9 @@
   [![REUSE](https://github.com/golusoris/.github/actions/workflows/reuse.yml/badge.svg?branch=main&event=push)](https://github.com/golusoris/.github/actions/workflows/reuse.yml)
   <!-- 3 security/scorecard -->
   [![OpenSSF Scorecard](https://img.shields.io/badge/OpenSSF-Scorecard-06b6d4?style=for-the-badge&labelColor=111a35)](https://scorecard.dev/viewer/?uri=github.com/golusoris/.github)
+  [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16160/badge)](https://www.bestpractices.dev/projects/16160)
+  [![Codacy](https://app.codacy.com/project/badge/Grade/616e991478d846b6a826f536d9645dd2)](https://app.codacy.com/gh/golusoris/.github/dashboard)
+  [![CodeRabbit](https://img.shields.io/badge/Reviews-CodeRabbit-8b5cf6?style=for-the-badge&logo=coderabbit&logoColor=white&labelColor=111a35)](https://coderabbit.ai)
   <!-- 4 standards -->
   [![HISS-21](https://img.shields.io/badge/Standards-HISS--21-06b6d4?style=for-the-badge&logo=nasa&labelColor=111a35)](https://github.com/golusoris/.github/blob/main/AGENTS.md)
   [![Conventional Commits](https://img.shields.io/badge/Commits-Conventional-8b5cf6?style=for-the-badge&logo=conventionalcommits&logoColor=white&labelColor=111a35)](https://github.com/golusoris/.github/blob/main/CONTRIBUTING.md)
