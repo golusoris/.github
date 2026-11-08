@@ -6,6 +6,7 @@ against the real repository files and against planted defects.
 """
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -22,14 +23,77 @@ LABEL_KEYS = frozenset({"name", "color", "description", "aliases"})
 # '#'; label-sync strips one leading '#' before sending it.
 LABEL_COLOR = re.compile(r"#?[0-9a-fA-F]{6}")
 
+# GitHub REST API limits: 422 'name is too long (maximum is 50 characters)'
+# and 'Description is too long (maximum is 100 characters)'.
+LABEL_NAME_MAX = 50
+LABEL_DESCRIPTION_MAX = 100
+
+# Bounded collection limits to satisfy HISS-02 scalar loop bounds.
+MAX_LABELS = 1000
+MAX_ANSWER_KEYS = 2000
+MAX_MARKDOWN_BYTES = 1_000_000
+MAX_MARKDOWN_FILES = 1000
+
 # Answer values the bestpractices.dev autofill file accepts per criterion.
 STATUS_VALUES = frozenset({"Met", "Unmet", "N/A", "?"})
 ANSWER_KEY = re.compile(r"[a-z0-9_]+_(status|justification)")
 
 # Markdown files the organisation renders: the profile, the community health
 # files and the decision records.
-MARKDOWN_GLOBS = ("*.md", "profile/*.md", "docs/**/*.md")
+MARKDOWN_GLOBS = ("*.md", "profile/**/*.md", "docs/**/*.md")
 EXTERNAL = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+
+class _LinkHTMLParser(HTMLParser):
+    """Extract link href and image src/srcset targets from HTML tokens."""
+
+    def __init__(self):
+        """Initialize the parser with an empty target buffer."""
+        super().__init__()
+        self.drained = []
+
+    def handle_starttag(self, tag, attrs):
+        """Collect targets from an HTML start or empty tag."""
+        attr_dict = dict(attrs)
+        if tag == "a" and "href" in attr_dict:
+            href = attr_dict["href"]
+            if href:
+                self.drained.append((href, False))
+        elif tag == "img" and "src" in attr_dict:
+            src = attr_dict["src"]
+            if src:
+                self.drained.append((src, True))
+        elif tag == "source" and "srcset" in attr_dict:
+            srcset = attr_dict["srcset"]
+            if srcset:
+                for part in srcset.split(","):
+                    candidate = part.strip()
+                    if candidate:
+                        url = candidate.split()[0]
+                        if url:
+                            self.drained.append((url, True))
+
+    def drain(self):
+        """Return the collected targets and clear the buffer."""
+        collected = self.drained
+        self.drained = []
+        return collected
+
+
+class MarkdownTooLarge(ValueError):
+    """A Markdown file is larger than MAX_MARKDOWN_BYTES."""
+
+
+def _html_targets(fragment):
+    """Return the (target, is_image) pairs of one raw HTML fragment.
+
+    Each fragment gets its own parser, closed at the end, so an unfinished
+    tag in one fragment cannot join the text of the next.
+    """
+    parser = _LinkHTMLParser()
+    parser.feed(fragment)
+    parser.close()
+    return parser.drain()
 
 
 def check_label(entry, index):
@@ -40,14 +104,24 @@ def check_label(entry, index):
     name = entry.get("name")
     if not isinstance(name, str) or not name.strip():
         errors.append(f"entry {index}: name must be a non-empty string")
+    elif len(name) > LABEL_NAME_MAX:
+        errors.append(f"entry {index}: name exceeds {LABEL_NAME_MAX} characters")
     color = entry.get("color")
     if not isinstance(color, str) or not LABEL_COLOR.fullmatch(color):
         errors.append(f"entry {index}: color must be six hexadecimal digits")
-    if "description" in entry and not isinstance(entry["description"], str):
-        errors.append(f"entry {index}: description must be a string")
+    if "description" in entry:
+        desc = entry["description"]
+        if not isinstance(desc, str):
+            errors.append(f"entry {index}: description must be a string")
+        elif len(desc) > LABEL_DESCRIPTION_MAX:
+            errors.append(f"entry {index}: description exceeds {LABEL_DESCRIPTION_MAX} characters")
     aliases = entry.get("aliases", [])
     if not isinstance(aliases, list) or not all(isinstance(a, str) and a.strip() for a in aliases):
         errors.append(f"entry {index}: aliases must be a list of non-empty strings")
+    else:
+        for alias in aliases:
+            if len(alias) > LABEL_NAME_MAX:
+                errors.append(f"entry {index}: alias {alias!r} exceeds {LABEL_NAME_MAX} characters")
     return errors
 
 
@@ -63,6 +137,8 @@ def check_labels(data):
     """Return the errors of a parsed labels.yml document."""
     if not isinstance(data, list) or not data:
         return ["labels.yml must be a non-empty list"]
+    if len(data) > MAX_LABELS:
+        return [f"labels.yml: more than {MAX_LABELS} entries"]
     errors = []
     seen = {}
     for index, entry in enumerate(data):
@@ -81,12 +157,14 @@ def check_answers(data):
     """Return the errors of a parsed .bestpractices.json document."""
     if not isinstance(data, dict) or not data:
         return [".bestpractices.json must be a non-empty object"]
+    if len(data) > MAX_ANSWER_KEYS:
+        return [f".bestpractices.json: more than {MAX_ANSWER_KEYS} keys"]
     errors = [f"{key}: not a <criterion>_status or _justification key" for key in sorted(data) if not ANSWER_KEY.fullmatch(key)]
     statuses = {key[: -len("_status")] for key in data if key.endswith("_status")}
     justified = {key[: -len("_justification")] for key in data if key.endswith("_justification")}
     for criterion in sorted(statuses):
         value = data[criterion + "_status"]
-        if value not in STATUS_VALUES:
+        if not isinstance(value, str) or value not in STATUS_VALUES:
             errors.append(f"{criterion}_status: {value!r} is not one of {sorted(STATUS_VALUES)}")
         text = data.get(criterion + "_justification")
         if not isinstance(text, str) or not text.strip():
@@ -95,56 +173,182 @@ def check_answers(data):
     return errors
 
 
+def required_contexts(ruleset):
+    """Return the status check contexts a parsed ruleset requires."""
+    rules = ruleset.get("rules") if isinstance(ruleset, dict) else None
+    if not isinstance(rules, list):
+        return []
+    contexts = []
+    for rule in rules:
+        if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+            continue
+        parameters = rule.get("parameters")
+        checks = parameters.get("required_status_checks") if isinstance(parameters, dict) else None
+        for check in checks if isinstance(checks, list) else []:
+            if isinstance(check, dict) and isinstance(check.get("context"), str):
+                contexts.append(check["context"])
+    return contexts
+
+
+# A pull_request filter that can skip the workflow. A skipped workflow leaves
+# its required check pending, which blocks the merge (GitHub Docs, "Skipping
+# workflow runs").
+SKIPPING_FILTERS = ("paths", "paths-ignore", "branches-ignore")
+
+
+def runs_on_every_pull_request(workflow):
+    """Return whether a parsed workflow runs on every pull request."""
+    # PyYAML reads the bare key `on` as the boolean True.
+    trigger = workflow.get("on", workflow.get(True))
+    if isinstance(trigger, str):
+        return trigger == "pull_request"
+    if isinstance(trigger, list):
+        return "pull_request" in [name for name in trigger if isinstance(name, str)]
+    if not isinstance(trigger, dict) or "pull_request" not in trigger:
+        return False
+    config = trigger["pull_request"]
+    return not (isinstance(config, dict) and any(key in config for key in SKIPPING_FILTERS))
+
+
+def check_required_checks(ruleset, workflows):
+    """Return the required status checks no pull request workflow job reports."""
+    if not isinstance(ruleset, dict):
+        return ["ruleset must be a mapping"]
+    reported = set()
+    for workflow in workflows:
+        if not isinstance(workflow, dict) or not runs_on_every_pull_request(workflow):
+            continue
+        jobs = workflow.get("jobs")
+        for job_id, job in jobs.items() if isinstance(jobs, dict) else []:
+            reported.add(job.get("name", job_id) if isinstance(job, dict) else job_id)
+    return [
+        f"required check {context!r} not found in pull_request workflows"
+        for context in required_contexts(ruleset)
+        if context not in reported
+    ]
+
+
+# The commitments of the README test policy (README.md, "Test policy").
+TEST_POLICY_FRAGMENTS = (
+    "Test policy:",
+    "adds a test to `tests/` in the same pull request",
+    "a passing case",
+    "a refused planted defect",
+    "the boundary between them",
+    "A fix adds a test that fails without it",
+)
+
+
+def check_test_policy(text):
+    """Return the test policy commitments a README text does not state.
+
+    Line breaks and runs of spaces count as one space, so rewrapping the
+    paragraph does not change the result.
+    """
+    collapsed = " ".join(text.split())
+    return [f"README.md: test policy lacks {fragment!r}" for fragment in TEST_POLICY_FRAGMENTS if fragment not in collapsed]
+
+
+def _extract_targets(text):
+    """Return all targets in document order and the set of image targets."""
+    env = {}
+    tokens = MarkdownIt("commonmark").enable("table").parse(text, env)
+    targets = []
+    image_targets = set()
+    # Token loops are bounded by MAX_MARKDOWN_BYTES since MarkdownIt parses
+    # a finite input string whose length is capped prior to parsing.
+    for block in tokens:
+        if block.type == "html_block" and block.content:
+            for target, is_image in _html_targets(block.content):
+                targets.append(target)
+                if is_image:
+                    image_targets.add(target)
+        for token in block.children or []:
+            if token.type == "link_open":
+                href = token.attrGet("href")
+                if href:
+                    targets.append(href)
+            elif token.type == "image":
+                src = token.attrGet("src")
+                if src:
+                    targets.append(src)
+                    image_targets.add(src)
+            elif token.type == "html_inline" and token.content:
+                for target, is_image in _html_targets(token.content):
+                    targets.append(target)
+                    if is_image:
+                        image_targets.add(target)
+    references = env.get("references", {})
+    for label in sorted(references):
+        href = references[label].get("href")
+        if href is not None:
+            targets.append(href)
+    deduped = [target for target in dict.fromkeys(targets) if target is not None]
+    return deduped, image_targets
+
+
 def link_targets(text):
     """Return the link and image targets of a Markdown text, code excluded.
 
     Each target appears once, in document order, followed by the targets of
-    reference definitions no link uses. Raw HTML is left unchecked.
+    reference definitions no link uses. Raw HTML a, img, and source tags are
+    checked; comments and other tags are ignored.
     """
-    env = {}
-    tokens = MarkdownIt("commonmark").enable("table").parse(text, env)
-    targets = []
-    # Links and images sit only in the children of inline tokens; an image's
-    # own children are its alt text, which renders as plain text.
-    for block in tokens:
-        for token in block.children or []:
-            if token.type == "link_open":
-                targets.append(token.attrGet("href"))
-            elif token.type == "image":
-                targets.append(token.attrGet("src"))
-    references = env.get("references", {})
-    targets.extend(references[label].get("href") for label in sorted(references))
-    return [target for target in dict.fromkeys(targets) if target is not None]
+    targets, _ = _extract_targets(text)
+    return targets
 
 
-def relative_targets(path):
-    """Return the relative link targets in the Markdown file at path."""
-    targets = []
-    for target in link_targets(path.read_text(encoding="utf-8")):
+def _relative_targets(path):
+    """Return relative targets and the set of image targets for path."""
+    if path.stat().st_size > MAX_MARKDOWN_BYTES:
+        raise MarkdownTooLarge(f"{path}: more than {MAX_MARKDOWN_BYTES} bytes")
+    targets, image_targets = _extract_targets(path.read_text(encoding="utf-8"))
+    rel_targets = []
+    for target in targets:
         if target.startswith("//") or EXTERNAL.match(target):
             continue
         local = target.split("#", 1)[0].split("?", 1)[0]
         if not local:
             continue
-        targets.append(target)
+        rel_targets.append(target)
+    return rel_targets, image_targets
+
+
+def relative_targets(path):
+    """Return the relative link targets in the Markdown file at path."""
+    targets, _ = _relative_targets(path)
     return targets
 
 
 def check_links(path, root=ROOT):
     """Return the relative link targets in path that name no file in root."""
+    rel = path.relative_to(root)
+    try:
+        targets, image_targets = _relative_targets(path)
+    except MarkdownTooLarge:
+        return [f"{rel}: more than {MAX_MARKDOWN_BYTES} bytes"]
     errors = []
-    for target in relative_targets(path):
+    for target in targets:
         local = target.split("#", 1)[0].split("?", 1)[0]
         unquoted = unquote(local)
         base = root if unquoted.startswith("/") else path.parent
         target_path = (base / unquoted.lstrip("/")).resolve()
         if not target_path.is_relative_to(root.resolve()):
-            errors.append(f"{path.relative_to(root)}: {target} leaves the repository")
+            errors.append(f"{rel}: {target} leaves the repository")
         elif not target_path.exists():
-            errors.append(f"{path.relative_to(root)}: {target} names no file")
+            errors.append(f"{rel}: {target} names no file")
+        elif target in image_targets and not target_path.is_file():
+            errors.append(f"{rel}: {target} names a directory, not an image file")
     return errors
 
 
 def markdown_files(root=ROOT):
     """Return the rendered Markdown files under root, sorted."""
-    return sorted({path for pattern in MARKDOWN_GLOBS for path in root.glob(pattern) if path.is_file()})
+    discovered = set()
+    for pattern in MARKDOWN_GLOBS:
+        for path in root.glob(pattern):
+            if path.is_file():
+                discovered.add(path)
+                if len(discovered) > MAX_MARKDOWN_FILES:
+                    raise ValueError(f"{root}: more than {MAX_MARKDOWN_FILES} markdown files")
+    return sorted(discovered)

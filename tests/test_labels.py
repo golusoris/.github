@@ -4,7 +4,13 @@ import unittest
 
 import yaml
 
-from .repo_checks import ROOT, check_labels
+from .repo_checks import (
+    LABEL_DESCRIPTION_MAX,
+    LABEL_NAME_MAX,
+    MAX_LABELS,
+    ROOT,
+    check_labels,
+)
 
 
 def label(name="type:feat", color="0e8a16", **extra):
@@ -91,6 +97,33 @@ class LabelColorBoundaryTest(unittest.TestCase):
         for color in ("", "fff", "12345", "1234567", "##123456", "12345g", 123456):
             with self.subTest(color=color):
                 self.assertNotEqual(check_labels([label(color=color)]), [])
+
+
+class LabelBoundaryTest(unittest.TestCase):
+    def test_name_length_boundary(self):
+        """A label name of 50 characters passes while 51 characters is refused."""
+        self.assertEqual(check_labels([label(name="a" * LABEL_NAME_MAX)]), [])
+        errors = check_labels([label(name="a" * (LABEL_NAME_MAX + 1))])
+        self.assertTrue(any("name exceeds" in err for err in errors), errors)
+
+    def test_description_length_boundary(self):
+        """A description of 100 characters passes while 101 characters is refused."""
+        self.assertEqual(check_labels([label(description="d" * LABEL_DESCRIPTION_MAX)]), [])
+        errors = check_labels([label(description="d" * (LABEL_DESCRIPTION_MAX + 1))])
+        self.assertTrue(any("description exceeds" in err for err in errors), errors)
+
+    def test_alias_length_boundary(self):
+        """A label alias of 50 characters passes while 51 characters is refused."""
+        self.assertEqual(check_labels([label(aliases=["a" * LABEL_NAME_MAX])]), [])
+        errors = check_labels([label(aliases=["a" * (LABEL_NAME_MAX + 1)])])
+        self.assertTrue(any("alias" in err and "exceeds" in err for err in errors), errors)
+
+    def test_label_count_boundary(self):
+        """A document with 1000 labels passes while 1001 entries is refused."""
+        labels_1000 = [label(name=f"l{i}") for i in range(MAX_LABELS)]
+        self.assertEqual(check_labels(labels_1000), [])
+        labels_1001 = [label(name=f"l{i}") for i in range(MAX_LABELS + 1)]
+        self.assertEqual(check_labels(labels_1001), [f"labels.yml: more than {MAX_LABELS} entries"])
 
 
 if __name__ == "__main__":
