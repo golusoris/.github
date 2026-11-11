@@ -1,0 +1,5 @@
+# Exclude patterns for lychee (.github/workflows/links.yml). One regex per
+# line; each pattern sits directly under its exception line, which
+# tests/test_link_exceptions.py checks (fields, expiry, still in use).
+# exception | file: profile/README.md | rule: link-status | category: D | entered: 2026-11-11 | expires: 2027-03-11 | reason: ko-fi sits behind a Cloudflare bot wall that challenges some automated clients (HTTP 403, cf-mitigated: challenge), so the result depends on client and network; the link is the organisation's funding link and stays
+^https://ko-fi\.com/lusoris$

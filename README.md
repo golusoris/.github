@@ -1,6 +1,18 @@
 # golusoris/.github
 
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16160/badge)](https://www.bestpractices.dev/projects/16160)
+<!-- markdownlint-disable MD013 -->
+<!-- 2 CI/build -->
+[![Tests](https://img.shields.io/github/actions/workflow/status/golusoris/.github/test.yml?branch=main&event=push&style=for-the-badge&label=Tests&labelColor=111a35)](https://github.com/golusoris/.github/actions/workflows/test.yml)
+[![REUSE](https://img.shields.io/github/actions/workflow/status/golusoris/.github/reuse.yml?branch=main&event=push&style=for-the-badge&label=REUSE&labelColor=111a35)](https://github.com/golusoris/.github/actions/workflows/reuse.yml)
+<!-- 3 security/scorecard -->
+[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/golusoris/.github?style=for-the-badge&label=OpenSSF%20Scorecard&labelColor=111a35)](https://scorecard.dev/viewer/?uri=github.com/golusoris/.github) [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16160/badge)](https://www.bestpractices.dev/projects/16160)
+<!-- 4 standards -->
+[![Conventional Commits](https://img.shields.io/badge/Commits-Conventional-8b5cf6?style=for-the-badge&logo=conventionalcommits&logoColor=white&labelColor=111a35)](CONTRIBUTING.md)
+<!-- 5 licence -->
+[![License](https://img.shields.io/badge/License-EUPL--1.2_·_CC--BY--SA--4.0-3b82f6?style=for-the-badge&labelColor=111a35)](REUSE.toml)
+<!-- markdownlint-enable MD013 -->
+
+**Community health files and the public profile of the golusoris organisation.**
 
 Organisation-wide community health files and the public organisation profile
 for [golusoris](https://github.com/golusoris). The profile page itself lives in
@@ -37,6 +49,13 @@ The suite checks what this repository publishes to the organisation:
   [Profile workflow](.github/workflows/profile.yml) runs it on pull requests
   that touch the profile or the checks, on `main` and weekly, so new public
   repositories are detected even without a push here.
+- Every `.lycheeignore` pattern carries a dated exception that has not
+  expired and still matches a link
+  ([`tests/test_link_exceptions.py`](tests/test_link_exceptions.py)).
+
+The [Links workflow](.github/workflows/links.yml) checks external links with
+lychee on pull requests that touch Markdown or the link check, on `main` and
+weekly.
 
 Test policy: a change that adds a published file, or a rule for one, adds a
 test to `tests/` in the same pull request, with a passing case, a refused

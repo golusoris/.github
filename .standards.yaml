@@ -67,3 +67,5 @@ exceptions:
     entered: "2026-10-22"
     expires: "2027-01-20"
     category: A
+gate:
+  readme_presentation: true
