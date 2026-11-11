@@ -1,10 +1,11 @@
 """External link exceptions expire and continue to name a published link."""
 
 import io
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -98,9 +99,17 @@ class PublishedLinkCheckTest(unittest.TestCase):
         self.assertEqual(repo_checks.check_link_exceptions(text, TODAY), [])
 
     def test_repository_exceptions_are_current(self):
-        """The live date turns an expired repository exception into a failure."""
+        """The live UTC date turns an expired repository exception into a failure."""
         text = (ROOT / ".lycheeignore").read_text(encoding="utf-8")
-        self.assertEqual(repo_checks.check_link_exceptions(text, date.today()), [])
+        today = datetime.now(timezone.utc).date()
+        self.assertEqual(repo_checks.check_link_exceptions(text, today), [])
+
+    def test_tests_read_no_local_clock(self):
+        """Tests take dates in UTC, so a result does not depend on the runner's time zone."""
+        local_clock = re.compile(r"\bdate\.today\(|\bdatetime\.(?:now|today)\(\s*\)")
+        for path in sorted((ROOT / "tests").glob("*.py")):
+            with self.subTest(path=path.name):
+                self.assertIsNone(local_clock.search(path.read_text(encoding="utf-8")))
 
     def test_link_inputs_lists_rendered_markdown(self):
         """The CLI prints exactly the existing walker's repository-relative paths."""
