@@ -12,6 +12,8 @@ from .repo_checks import (
     check_banner_clearance,
 )
 
+START_TAG_ERROR = "start tag must use exact attribute names with double-quoted values"
+
 
 class BannerClearanceTest(unittest.TestCase):
     """Exercise real banner geometry and the clearance boundary."""
@@ -23,6 +25,67 @@ class BannerClearanceTest(unittest.TestCase):
     def test_real_banner_has_clearance(self):
         """Every text element in the published banner clears the wave."""
         self.assertEqual(check_banner_clearance(self.svg), [])
+
+    def test_shadowed_uppercase_x_is_refused(self):
+        """XML x cannot be hidden behind HTMLParser's case-folded X value."""
+        svg = self.svg.replace('<text x="44"', '<text x="800" X="44"', 1)
+        self.assertIn("text: start tag must use exact attribute names with double-quoted values",
+                      check_banner_clearance(svg))
+
+    def test_mixed_case_stroke_join_is_refused(self):
+        """An XML-ignored join attribute cannot authorize the round envelope."""
+        svg = self.svg.replace('stroke-linejoin="round"', 'Stroke-linejoin="round"', 1)
+        self.assertIn("g: start tag must use exact attribute names with double-quoted values",
+                      check_banner_clearance(svg))
+
+    def test_noncanonical_element_case_is_refused(self):
+        """Every allowed element requires its canonical SVG spelling."""
+        # Two element-name boundaries: ordinary lowercase and canonical camelCase.
+        for original, planted, tag in (("text", "Text", "text"),
+                                       ("linearGradient", "lineargradient", "lineargradient")):
+            with self.subTest(planted=planted):
+                svg = self.svg.replace(f"<{original}", f"<{planted}", 1)
+                self.assertIn(
+                    f"{tag}: start tag must use exact attribute names with double-quoted values",
+                    check_banner_clearance(svg),
+                )
+
+    def test_lowercase_viewbox_is_refused(self):
+        """HTMLParser's lowercase viewbox spelling is not a valid SVG viewBox."""
+        svg = self.svg.replace("viewBox=", "viewbox=", 1)
+        self.assertIn("svg: start tag must use exact attribute names with double-quoted values",
+                      check_banner_clearance(svg))
+
+    def test_non_double_quoted_values_are_refused(self):
+        """Single-quoted and bare values cannot enter the exact start-tag grammar."""
+        # Two alternate quoting forms; each fixture remains below MAX_SVG_BYTES.
+        for attribute in ("x='44'", "x=44"):
+            with self.subTest(attribute=attribute):
+                svg = self.svg.replace('x="44"', attribute, 1)
+                self.assertIn(
+                    "text: start tag must use exact attribute names with double-quoted values",
+                    check_banner_clearance(svg),
+                )
+
+    def test_duplicate_attribute_is_refused(self):
+        """XML rejects a repeated x even when both values agree."""
+        svg = self.svg.replace('<text x="44"', '<text x="44" x="44"', 1)
+        self.assertEqual(check_banner_clearance(svg), ["text: duplicate attribute x"])
+
+    def test_canonical_start_tag_whitespace_passes(self):
+        """Canonical names accept multiline spacing and both empty-tag forms."""
+        svg = self.svg.replace(' x="44"', '\n\t x="44"', 1).replace('/>', ' />')
+        self.assertEqual(check_banner_clearance(svg), [])
+
+    def test_start_tag_grammar_variants_are_refused(self):
+        """Namespaces, unknown names and malformed values fail the exact grammar."""
+        attributes = ('xmlns:extra="urn:example"', 'xml:space="preserve"',
+                      'unknown="value"', 'fill="<red"', 'x ="44"', 'x= "44"')
+        # len(attributes) bounds the grammar matrix below MAX_SVG_BYTES.
+        for attribute in attributes:
+            with self.subTest(attribute=attribute):
+                svg = self.svg.replace('<text x="44"', f'<text {attribute}', 1)
+                self.assertIn(f"text: {START_TAG_ERROR}", check_banner_clearance(svg))
 
     def test_nested_svg_viewport_is_refused(self):
         """A subtitle viewport cannot shift both lines into the wave unnoticed."""
@@ -63,7 +126,8 @@ class BannerClearanceTest(unittest.TestCase):
     def test_group_transform_is_refused(self):
         """A translated subtitle group cannot silently move text geometry."""
         svg = self.svg.replace('<g font-family=', '<g transform="translate(500 0)" font-family=', 1)
-        self.assertEqual(check_banner_clearance(svg), ["g: transform is unsupported"])
+        self.assertEqual(check_banner_clearance(svg),
+                         [f"g: {START_TAG_ERROR}", "g: transform is unsupported"])
 
     def test_path_transform_is_refused(self):
         """A translated path cannot silently move the wave boundary."""
@@ -75,7 +139,9 @@ class BannerClearanceTest(unittest.TestCase):
         for tag in ("svg", "defs", "linearGradient", "stop", "rect"):
             with self.subTest(tag=tag):
                 svg = self.svg.replace(f"<{tag}", f'<{tag} transform="translate(500 0)"', 1)
-                self.assertEqual(check_banner_clearance(svg), [f"{tag.lower()}: transform is unsupported"])
+                self.assertEqual(check_banner_clearance(svg),
+                                 [f"{tag.lower()}: {START_TAG_ERROR}",
+                                  f"{tag.lower()}: transform is unsupported"])
 
     def test_root_inherited_geometry_is_refused(self):
         """Root CSS and inherited font metrics cannot evade attribute checks."""
@@ -85,7 +151,8 @@ class BannerClearanceTest(unittest.TestCase):
             with self.subTest(attribute=attribute):
                 svg = self.svg.replace('<svg ', f'<svg {attribute} ', 1)
                 name = attribute.split("=", 1)[0]
-                self.assertEqual(check_banner_clearance(svg), [f"svg: unsupported attribute {name}"])
+                self.assertEqual(check_banner_clearance(svg),
+                                 [f"svg: {START_TAG_ERROR}", f"svg: unsupported attribute {name}"])
 
     def test_decorative_element_attributes_are_refused(self):
         """Every non-text element refuses an attribute outside its exact set."""
@@ -94,7 +161,8 @@ class BannerClearanceTest(unittest.TestCase):
             with self.subTest(tag=tag):
                 svg = self.svg.replace("</svg>", f'<{tag} style="font-size:40px"/></svg>')
                 self.assertEqual(check_banner_clearance(svg),
-                                 [f"{tag.lower()}: unsupported attribute style"])
+                                 [f"{tag.lower()}: {START_TAG_ERROR}",
+                                  f"{tag.lower()}: unsupported attribute style"])
 
     def test_attribute_free_title_and_description_pass(self):
         """Zero attributes remain valid for descriptive SVG elements."""
@@ -133,6 +201,7 @@ class BannerClearanceTest(unittest.TestCase):
         svg = ('<svg><text x="0" font-size="10" textLength="20" dx="2">abc</text>'
                '<g stroke-linejoin="round"><path stroke-width="0" d="M50 0"/></g></svg>')
         self.assertEqual(check_banner_clearance(svg, advance=1), [
+            f"text: {START_TAG_ERROR}",
             "text: unsupported attribute dx",
             "text: unsupported attribute textlength",
             "abc: right edge 30.0 within 24 of wave start 50.0",
@@ -166,7 +235,8 @@ class BannerClearanceTest(unittest.TestCase):
     def test_valueless_letter_spacing_is_refused(self):
         """A present letter-spacing attribute requires a numeric value."""
         svg = '<svg><text x="0" font-size="10" letter-spacing>abc</text><g stroke-linejoin="round"><path stroke-width="0" d="M80 0"/></g></svg>'
-        self.assertEqual(check_banner_clearance(svg), ["abc: invalid letter-spacing"])
+        self.assertEqual(check_banner_clearance(svg),
+                         [f"text: {START_TAG_ERROR}", "abc: invalid letter-spacing"])
 
     def test_original_wave_start_overlaps_subtitles(self):
         """Moving the waves back to x=700 flags both monospace subtitles."""
@@ -425,7 +495,7 @@ class BannerClearanceTest(unittest.TestCase):
         svg = ('<svg><text x="0" font-size="10">abc</text>'
                '<g stroke-linejoin="round"><path d="M54 0" stroke-width="0"/></g></svg>')
         # W and F width classes each contain three glyphs.
-        for text in ("界界界", "ａｂｃ"):
+        for text in ("界界界", "\uff41\uff42\uff43"):
             with self.subTest(text=text):
                 wide = svg.replace("abc", text)
                 self.assertIn(f"{text}: right edge 60.0 within 24 of wave start 54.0",
@@ -444,9 +514,9 @@ class BannerClearanceTest(unittest.TestCase):
 
     def test_wide_negative_spacing_boundary(self):
         """Reversed spacing cannot shrink a single fullwidth glyph's own width."""
-        svg = ('<svg><text x="0" font-size="10" letter-spacing="-20">ａ</text>'
+        svg = ('<svg><text x="0" font-size="10" letter-spacing="-20">\uff41</text>'
                '<g stroke-linejoin="round"><path d="M43 0" stroke-width="0"/></g></svg>')
-        self.assertIn("ａ: right edge 20.0 within 24 of wave start 43.0",
+        self.assertIn("\uff41: right edge 20.0 within 24 of wave start 43.0",
                       check_banner_clearance(svg, advance=1))
         self.assertEqual(check_banner_clearance(svg.replace("M43", "M44"), advance=1), [])
 

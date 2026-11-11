@@ -68,6 +68,19 @@ BANNER_ATTRIBUTES = {
 # Elements the clearance model reads or that carry no glyph geometry; any other
 # element (use, textPath, image, foreignObject, ...) could place text unmodeled.
 BANNER_ELEMENTS = frozenset(BANNER_ATTRIBUTES)
+# Only these allowed SVG names differ from HTMLParser's lowercase lookup keys.
+BANNER_CANONICAL_NAMES = {"viewbox": "viewBox", "lineargradient": "linearGradient"}
+# len(BANNER_ATTRIBUTES) bounds tags; each finite allow-list bounds alternatives.
+BANNER_START_TAGS = {
+    tag: re.compile(
+        "<" + re.escape(BANNER_CANONICAL_NAMES.get(tag, tag))
+        + (r'(?:\s+(?:' + "|".join(
+            re.escape(BANNER_CANONICAL_NAMES.get(name, name)) for name in sorted(attributes)
+        ) + r')="[^"<]*")*' if attributes else "")
+        + r"\s*/?>"
+    )
+    for tag, attributes in BANNER_ATTRIBUTES.items()
+}
 
 MAX_LINK_EXCEPTIONS = 100
 EXCEPTION_PREFIX = "# exception | "
@@ -79,7 +92,16 @@ LINK_EXCEPTION_DAYS = {"B": 3, "C": 10, "D": 120}
 # Cap source discovery and each read; these also bound all suppression line scans.
 MAX_SUPPRESSION_FILES = 100
 MAX_SUPPRESSION_BYTES = 1_000_000
-SUPPRESSION_MARKER = re.compile(r"#\s*(?:nosec|nosemgrep|noqa)\b")
+# Python comment directives that disable lint, type, security, coverage or format
+# checks: nosec, nosemgrep, noqa (also ruff/flake8), type: ignore, pyright, pylint,
+# mypy, pragma: no cover/no branch, fmt: off/skip, isort: skip/off/skip_file.
+SUPPRESSION_MARKER = re.compile(
+    r"#\s*(?:nosec\b|nosemgrep\b|(?:(?:ruff|flake8)\s*:\s*)?noqa\b|"
+    r"type\s*:\s*ignore\b|(?:pyright|pylint|mypy)\s*:|"
+    r"pragma\s*:\s*no\s+(?:cover|branch)\b|fmt\s*:\s*(?:off|skip)\b|"
+    r"isort\s*:\s*(?:skip_file|skip|off)\b)",
+    re.IGNORECASE,
+)
 
 # Answer values the bestpractices.dev autofill file accepts per criterion.
 STATUS_VALUES = frozenset({"Met", "Unmet", "N/A", "?"})
@@ -476,6 +498,16 @@ class _BannerParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         """Collect geometry and inherit font-size and stroke bounds from groups."""
+        pattern = BANNER_START_TAGS.get(tag)
+        if pattern is None or not pattern.fullmatch(self.get_starttag_text()):
+            self.errors.append(
+                f"{tag}: start tag must use exact attribute names with double-quoted values")
+        seen = set()
+        # MAX_SVG_BYTES bounds the attribute count before parsing.
+        for name, _ in attrs:
+            if name in seen:
+                self.errors.append(f"{tag}: duplicate attribute {name}")
+            seen.add(name)
         if self.first_element and tag != "svg":
             self.errors.append("svg: first element must be svg")
         elif not self.first_element and tag == "svg":
@@ -523,6 +555,8 @@ class _BannerParser(HTMLParser):
 
     def handle_endtag(self, tag):
         """Finish text records or pop one enclosing group."""
+        # No raw end-tag text from HTMLParser; wrong case makes XML ill-formed,
+        # so the SVG renderer displays no text and end tags stay unchecked here.
         if tag == "g" and self.groups:
             self.groups.pop()
         elif tag == "text" and self.active_text is not None:
@@ -801,7 +835,7 @@ def _suppression_text_errors(text, name, today):
                 found.append("exception has no suppression directly below it")
         if SUPPRESSION_MARKER.search(line):
             previous = lines[index - 1] if index else ""
-            found = _suppression_record_errors(previous, name, today)
+            found.extend(_suppression_record_errors(previous, name, today))
         errors.extend(f"{name}:{index + 1}: {error}" for error in found)
     return errors
 

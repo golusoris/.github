@@ -16,6 +16,17 @@ EXCEPTION = (
     " | expires: 2027-03-11 | reason: Fixed argv needs a child process."
 )
 MARKERS = ("nosec B404", "nosemgrep: example.rule", "noqa: I001")
+DIRECTIVES = (
+    "ruff: noqa", "flake8: noqa", "NOQA", "ruff: noqa: E501",
+    "flake8: noqa: E501",
+    "type: ignore", "pylint: disable=all", "pyright: ignore", "mypy: ignore-errors",
+    "pragma: no cover", "pragma: no branch", "fmt: off", "fmt: skip",
+    "isort: skip", "isort: off", "isort: skip_file",
+    "ruff : NOQA : E501", "flake8\t:\tNoQa", "type : ignore[assignment]",
+    "pyright : strict", "pylint : enable=all", "mypy : strict",
+    "pragma : no\tcover", "pragma : no branch", "fmt : off", "fmt : skip",
+    "isort : skip", "isort : off", "isort : skip_file", "NOSEC", "NOSEMGREP",
+)
 
 
 class SuppressionExceptionsTest(unittest.TestCase):
@@ -59,6 +70,35 @@ class SuppressionExceptionsTest(unittest.TestCase):
         for marker in MARKERS:
             with self.subTest(marker=marker):
                 self.assertRefused(f"import os  # {marker}\n", "directly follow an exception")
+
+    def test_directives_without_records_are_refused(self):
+        """Tool prefixes, case and whitespace cannot bypass the record check."""
+        # len(DIRECTIVES) bounds the spelling matrix; two comment spacings each.
+        for directive in DIRECTIVES:
+            for space in ("", " \t"):
+                with self.subTest(directive=directive, space=space):
+                    self.assertRefused(f"#{space}{directive}\nx = 1\n",
+                                       "suppression must directly follow an exception line")
+
+    def test_directives_with_records_pass(self):
+        """Every recognized directive accepts an adjacent valid dated record."""
+        # len(DIRECTIVES) bounds the spelling matrix; two comment spacings each.
+        for directive in DIRECTIVES:
+            for space in ("", " \t"):
+                with self.subTest(directive=directive, space=space):
+                    self.assertEqual(self.check(f"{EXCEPTION}\n#{space}{directive}\n"), [])
+
+    def test_tool_mentions_without_directives_pass(self):
+        """Ordinary tool mentions and longer directive words need no record."""
+        comments = (
+            "ruff is configured in CI", "type hints below", "flake8 is configured",
+            "pylint checks this", "pyright checks this", "mypy checks this",
+            "pragma: no coverage", "fmt: offset", "isort: skip_files",
+        )
+        # len(comments) bounds the non-directive boundary matrix.
+        for comment in comments:
+            with self.subTest(comment=comment):
+                self.assertEqual(self.check(f"# {comment}\nx = 1\n"), [])
 
     def test_ordinary_exception_comment_passes(self):
         """The word exceptions does not begin an exception record."""
@@ -111,6 +151,20 @@ class SuppressionExceptionsTest(unittest.TestCase):
         for following in ("", "\n", "\n# ordinary comment\n"):
             with self.subTest(following=following):
                 self.assertRefused(EXCEPTION + following, "no suppression directly below")
+
+    def test_orphan_record_with_marker_is_refused(self):
+        """Valid preceding metadata cannot erase a marker-bearing orphan error."""
+        name = "tests/x.py"
+        record = EXCEPTION.replace(SOURCE, name)
+        text = record + "\n" + record + " see # " + "noqa\nx = 1\n"
+        self.assertEqual(repo_checks._suppression_text_errors(text, name, TODAY),
+                         [f"{name}:2: exception has no suppression directly below it"])
+
+    def test_record_with_marker_and_following_suppression_passes(self):
+        """A marker-bearing record passes when both adjacency checks hold."""
+        text = (EXCEPTION + "\n" + EXCEPTION + " see # " + "noqa\n"
+                + "x = 1  # " + MARKERS[0] + "\n")
+        self.assertEqual(self.check(text), [])
 
     def test_marker_in_string_literal_still_counts(self):
         """The conservative line scan also catches comment forms inside strings."""
