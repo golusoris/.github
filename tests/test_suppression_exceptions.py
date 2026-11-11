@@ -60,6 +60,16 @@ class SuppressionExceptionsTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertRefused(f"import os  # {marker}\n", "directly follow an exception")
 
+    def test_ordinary_exception_comment_passes(self):
+        """The word exceptions does not begin an exception record."""
+        self.assertEqual(self.check("# exceptions are logged below\npass\n"), [])
+
+    def test_malformed_exception_prefix_is_refused(self):
+        """A colon prefix cannot authorize an adjacent suppression marker."""
+        text = EXCEPTION.replace("# exception | ", "# exception: ")
+        self.assertRefused(text + f"\n# {MARKERS[0]}\n",
+                           "suppression must directly follow an exception line")
+
     def test_wrong_file_is_refused(self):
         """A record for another source cannot authorize this suppression."""
         text = EXCEPTION.replace(SOURCE, "tests/other.py") + f"\nimport os  # {MARKERS[0]}\n"

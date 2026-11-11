@@ -7,6 +7,7 @@ against the real repository files and against planted defects.
 
 import math
 import re
+import unicodedata
 from datetime import date, timedelta
 from html.parser import HTMLParser
 from itertools import islice
@@ -52,7 +53,9 @@ BANNER_ATTRIBUTES = {
     "rect": frozenset({"width", "height", "rx", "fill"}),
     "title": frozenset(),
     "desc": frozenset(),
-    "g": frozenset({"fill", "stroke-linecap", "font-family", "font-size", "opacity"}),
+    "g": frozenset({
+        "fill", "stroke-linecap", "stroke-linejoin", "font-family", "font-size", "opacity",
+    }),
     "text": frozenset({
         "x", "y", "font-family", "font-size", "font-weight", "fill", "letter-spacing", "opacity",
     }),
@@ -67,6 +70,7 @@ BANNER_ATTRIBUTES = {
 BANNER_ELEMENTS = frozenset(BANNER_ATTRIBUTES)
 
 MAX_LINK_EXCEPTIONS = 100
+EXCEPTION_PREFIX = "# exception | "
 LINK_EXCEPTION_KEYS = ("file", "rule", "category", "entered", "expires", "reason")
 MAX_LINK_EXCEPTION_FIELDS = len(LINK_EXCEPTION_KEYS) + 1
 LINK_EXCEPTION_DATE_KEYS = ("entered", "expires")
@@ -439,11 +443,29 @@ def _attribute_errors(tag, attributes):
     return errors
 
 
+def _wave_envelope(attributes, inherited):
+    """Bound a supported stroke by its control hull plus half its width."""
+    join = attributes.get("stroke-linejoin", inherited.get("stroke-linejoin"))
+    if join not in {"round", "bevel"}:
+        raise ValueError("path: stroke-linejoin must be round or bevel")
+    cap = attributes.get("stroke-linecap", inherited.get("stroke-linecap"))
+    if cap not in {None, "butt", "round"}:
+        raise ValueError("path: stroke-linecap must be absent, butt or round")
+    width_text = attributes.get("stroke-width", "1")
+    message = "path: stroke-width must be a finite nonnegative plain number"
+    if not isinstance(width_text, str) or not SVG_NUMBER.fullmatch(width_text):
+        raise ValueError(message)
+    width = float(width_text)
+    if not math.isfinite(width) or width < 0:
+        raise ValueError(message)
+    return _wave_start(attributes.get("d") or "") - width / 2
+
+
 class _BannerParser(HTMLParser):
     """Collect SVG text geometry and absolute paths with bounded group nesting."""
 
     def __init__(self):
-        """Initialize text, path, error and inherited font-size buffers."""
+        """Initialize text, path, error and inherited group attribute buffers."""
         super().__init__()
         self.groups = []
         self.active_text = None
@@ -453,7 +475,7 @@ class _BannerParser(HTMLParser):
         self.first_element = True
 
     def handle_starttag(self, tag, attrs):
-        """Collect geometry and inherit font-size from the nearest group."""
+        """Collect geometry and inherit font-size and stroke bounds from groups."""
         if self.first_element and tag != "svg":
             self.errors.append("svg: first element must be svg")
         elif not self.first_element and tag == "svg":
@@ -462,23 +484,37 @@ class _BannerParser(HTMLParser):
         # One root viewBox scales text and waves alike; geometry stays in root user units.
         attributes = dict(attrs)
         self.errors.extend(_attribute_errors(tag, attributes))
-        inherited = self.groups[-1] if self.groups else None
+        inherited = self.groups[-1] if self.groups else {}
         if tag == "g":
             if len(self.groups) >= MAX_SVG_DEPTH:
                 raise ValueError(f"SVG: group nesting exceeds {MAX_SVG_DEPTH}")
-            self.groups.append(attributes.get("font-size", inherited))
+            # Three inherited keys; group count is bounded by MAX_SVG_DEPTH.
+            self.groups.append({key: attributes.get(key, inherited.get(key))
+                                for key in ("font-size", "stroke-linecap", "stroke-linejoin")})
         elif tag == "text":
             if self.active_text is not None:
                 raise ValueError("SVG: nested text elements unsupported")
             self.active_text = (
-                attributes.get("x"), attributes.get("font-size", inherited), [],
+                attributes.get("x"), attributes.get("font-size", inherited.get("font-size")), [],
                 attributes.get("letter-spacing", 0),
             )
         elif tag == "path":
             try:
-                self.paths.append(_wave_start(attributes.get("d") or ""))
+                self.paths.append(_wave_envelope(attributes, inherited))
             except ValueError as error:
                 self.errors.append(str(error))
+
+    def unknown_decl(self, data):
+        """Refuse CDATA content that HTMLParser does not emit as text."""
+        self.errors.append("SVG: CDATA section unsupported")
+
+    def handle_decl(self, decl):
+        """Refuse declarations that could define unmodeled text entities."""
+        self.errors.append("SVG: declaration unsupported")
+
+    def handle_pi(self, data):
+        """Refuse processing instructions that could restyle SVG geometry."""
+        self.errors.append("SVG: processing instruction unsupported")
 
     def handle_data(self, data):
         """Keep text content, including content inside tspan elements."""
@@ -491,7 +527,7 @@ class _BannerParser(HTMLParser):
             self.groups.pop()
         elif tag == "text" and self.active_text is not None:
             x, font_size, fragments, letter_spacing = self.active_text
-            self.texts.append(("".join(fragments).strip(), x, font_size, letter_spacing))
+            self.texts.append(("".join(fragments).strip(" \t\n\r"), x, font_size, letter_spacing))
             self.active_text = None
 
 
@@ -510,7 +546,17 @@ def _banner_text_errors(record, wave_start, margin, advance):
         return [f"{text}: invalid letter-spacing"]
     if not math.isfinite(letter_spacing):
         return [f"{text}: invalid letter-spacing"]
-    edge = x + len(text) * (advance * font_size + letter_spacing)
+    # Text length is bounded by MAX_SVG_BYTES; wide/fullwidth glyphs take two advances.
+    advances = sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in text)
+    count = len(text)
+    glyph_width = advance * font_size
+    # Negative steps make the first glyph rightmost; every occupied glyph keeps
+    # its full width. Extra wide-glyph advances stay occupied even with negative
+    # steps. Positive trailing spacing remains a conservative margin.
+    step = glyph_width + letter_spacing
+    edge = x if count == 0 else (
+        x + (count - 1) * max(step, 0) + glyph_width + max(letter_spacing, 0)
+        + (advances - count) * glyph_width)
     if edge > wave_start - margin:
         return [f"{text}: right edge {edge:.1f} within {margin} of wave start {wave_start:.1f}"]
     return []
@@ -601,7 +647,7 @@ def _is_link_exception_pattern(line):
 
 def _link_exception_metadata(line):
     """Parse an ordered allow-list of non-empty exception metadata fields."""
-    if not line.startswith("# exception | "):
+    if not line.startswith(EXCEPTION_PREFIX):
         return {}, ["pattern must directly follow an exception line"]
     parts = line.split(" | ")[1:]
     if len(parts) > MAX_LINK_EXCEPTION_FIELDS:
@@ -718,7 +764,7 @@ def check_link_exceptions(text, today, root=ROOT):
     previous = ""
     # Byte cap bounds line iteration; MAX_LINK_EXCEPTIONS bounds pattern checks.
     for index, line in enumerate(lines):
-        if line.lstrip().startswith("# exception"):
+        if line.lstrip().startswith(EXCEPTION_PREFIX):
             errors.extend(_orphan_link_exception(lines, index))
         elif _is_link_exception_pattern(line):
             count += 1
@@ -732,7 +778,7 @@ def check_link_exceptions(text, today, root=ROOT):
 
 def _suppression_record_errors(metadata, name, today):
     """Reuse ordered metadata and date validation for a source suppression."""
-    if not metadata.lstrip().startswith("# exception | "):
+    if not metadata.lstrip().startswith(EXCEPTION_PREFIX):
         return ["suppression must directly follow an exception line"]
     data, errors = _link_exception_metadata(metadata.lstrip())
     if errors:
@@ -749,7 +795,7 @@ def _suppression_text_errors(text, name, today):
     # MAX_SUPPRESSION_BYTES bounds the lines and diagnostics for each source.
     for index, line in enumerate(lines):
         found = []
-        if line.lstrip().startswith("# exception"):
+        if line.lstrip().startswith(EXCEPTION_PREFIX):
             following = lines[index + 1] if index + 1 < len(lines) else ""
             if not SUPPRESSION_MARKER.search(following):
                 found.append("exception has no suppression directly below it")

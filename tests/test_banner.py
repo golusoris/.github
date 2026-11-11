@@ -105,7 +105,7 @@ class BannerClearanceTest(unittest.TestCase):
         """Decorative opacity attributes do not change text clearance."""
         svg = ('<svg><g opacity="0.5"><text x="0" font-size="10" opacity="0.5">'
                'a<tspan fill="red" opacity="0.5">bc</tspan></text></g>'
-               '<path d="M54 0" fill-opacity="0.5" stroke-opacity="0.5"/></svg>')
+               '<g stroke-linejoin="round"><path stroke-width="0" d="M54 0" fill-opacity="0.5" stroke-opacity="0.5"/></g></svg>')
         self.assertEqual(check_banner_clearance(svg, advance=1), [])
 
     def test_text_anchor_is_refused(self):
@@ -131,7 +131,7 @@ class BannerClearanceTest(unittest.TestCase):
     def test_unsupported_attributes_are_sorted_and_geometry_collected(self):
         """All unsupported attributes and a clearance error are reported."""
         svg = ('<svg><text x="0" font-size="10" textLength="20" dx="2">abc</text>'
-               '<path d="M50 0"/></svg>')
+               '<g stroke-linejoin="round"><path stroke-width="0" d="M50 0"/></g></svg>')
         self.assertEqual(check_banner_clearance(svg, advance=1), [
             "text: unsupported attribute dx",
             "text: unsupported attribute textlength",
@@ -140,19 +140,19 @@ class BannerClearanceTest(unittest.TestCase):
 
     def test_letter_spacing_exact_margin_passes(self):
         """Positive spacing counts once per glyph at the exact margin."""
-        svg = '<svg><text x="0" font-size="10" letter-spacing="1">abc</text><path d="M57 0"/></svg>'
+        svg = '<svg><text x="0" font-size="10" letter-spacing="1">abc</text><g stroke-linejoin="round"><path stroke-width="0" d="M57 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg, advance=1), [])
 
     def test_letter_spacing_one_unit_inside_margin_fails(self):
         """Positive spacing moves the right edge one unit into the margin."""
-        svg = '<svg><text x="0" font-size="10" letter-spacing="1">abc</text><path d="M56 0"/></svg>'
+        svg = '<svg><text x="0" font-size="10" letter-spacing="1">abc</text><g stroke-linejoin="round"><path stroke-width="0" d="M56 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg, advance=1), [
             "abc: right edge 33.0 within 24 of wave start 56.0",
         ])
 
     def test_negative_letter_spacing_passes(self):
         """Negative spacing narrows the text to the exact clearance boundary."""
-        svg = '<svg><text x="0" font-size="10" letter-spacing="-1">abc</text><path d="M51 0"/></svg>'
+        svg = '<svg><text x="0" font-size="10" letter-spacing="-1">abc</text><g stroke-linejoin="round"><path stroke-width="0" d="M52 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg, advance=1), [])
 
     def test_invalid_letter_spacing_is_refused(self):
@@ -160,12 +160,12 @@ class BannerClearanceTest(unittest.TestCase):
         for spacing in ("wide", "nan", "inf", "-inf", "1e999", ""):
             with self.subTest(spacing=spacing):
                 svg = (f'<svg><text x="0" font-size="10" letter-spacing="{spacing}">abc</text>'
-                       '<path d="M80 0"/></svg>')
+                       '<g stroke-linejoin="round"><path stroke-width="0" d="M80 0"/></g></svg>')
                 self.assertEqual(check_banner_clearance(svg), ["abc: invalid letter-spacing"])
 
     def test_valueless_letter_spacing_is_refused(self):
         """A present letter-spacing attribute requires a numeric value."""
-        svg = '<svg><text x="0" font-size="10" letter-spacing>abc</text><path d="M80 0"/></svg>'
+        svg = '<svg><text x="0" font-size="10" letter-spacing>abc</text><g stroke-linejoin="round"><path stroke-width="0" d="M80 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg), ["abc: invalid letter-spacing"])
 
     def test_original_wave_start_overlaps_subtitles(self):
@@ -177,12 +177,12 @@ class BannerClearanceTest(unittest.TestCase):
 
     def test_exact_margin_passes(self):
         """A right edge exactly margin units before the path passes."""
-        svg = '<svg><text x="0" font-size="10">abc</text><path d="M54 0 L80 0"/></svg>'
+        svg = '<svg><text x="0" font-size="10">abc</text><g stroke-linejoin="round"><path stroke-width="0" d="M54 0 L80 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg, advance=1), [])
 
     def test_one_unit_inside_margin_fails(self):
         """A right edge one unit beyond the clearance boundary is refused."""
-        svg = '<svg><text x="1" font-size="10">abc</text><path d="M54 0 L80 0"/></svg>'
+        svg = '<svg><text x="1" font-size="10">abc</text><g stroke-linejoin="round"><path stroke-width="0" d="M54 0 L80 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg, advance=1), [
             "abc: right edge 31.0 within 24 of wave start 54.0",
         ])
@@ -191,28 +191,28 @@ class BannerClearanceTest(unittest.TestCase):
         """Nested groups inherit the nearest font-size, including tspan text."""
         svg = ('<svg><g font-size="100"><g font-size="10"><g>'
                '<text x="0">a<tspan>b</tspan>c</text></g></g></g>'
-               '<path d="M54 0 L80 0"/></svg>')
+               '<g stroke-linejoin="round"><path stroke-width="0" d="M54 0 L80 0"/></g></svg>')
         self.assertEqual(check_banner_clearance(svg, advance=1), [])
 
     def test_text_font_size_overrides_group(self):
         """A text element's font-size overrides the enclosing group."""
         svg = ('<svg><g font-size="100"><text x="0" font-size="10">abc</text>'
-               '</g><path d="M54 0"/></svg>')
+               '</g><g stroke-linejoin="round"><path stroke-width="0" d="M54 0"/></g></svg>')
         self.assertEqual(check_banner_clearance(svg, advance=1), [])
 
     def test_relative_commands_are_refused(self):
         """Relative m and c path commands cannot be treated as absolute x."""
-        svg = '<svg><text x="0" font-size="10">a</text><path d="m80 0 c1 2 3 4 5 6"/></svg>'
+        svg = '<svg><text x="0" font-size="10">a</text><g stroke-linejoin="round"><path stroke-width="0" d="m80 0 c1 2 3 4 5 6"/></g></svg>'
         self.assertIn("only absolute M, C, S and L commands", " ".join(check_banner_clearance(svg)))
 
     def test_other_absolute_commands_are_refused(self):
         """An absolute H command lacks paired x/y coordinates and is refused."""
-        svg = '<svg><text x="0" font-size="10">a</text><path d="M80 0 H90"/></svg>'
+        svg = '<svg><text x="0" font-size="10">a</text><g stroke-linejoin="round"><path stroke-width="0" d="M80 0 H90"/></g></svg>'
         self.assertIn("only absolute M, C, S and L commands", " ".join(check_banner_clearance(svg)))
 
     def test_no_text_is_refused(self):
         """A banner without text cannot silently pass geometry validation."""
-        self.assertEqual(check_banner_clearance('<svg><path d="M80 0"/></svg>'), ["SVG: no text elements"])
+        self.assertEqual(check_banner_clearance('<svg><g stroke-linejoin="round"><path stroke-width="0" d="M80 0"/></g></svg>'), ["SVG: no text elements"])
 
     def test_no_paths_is_refused(self):
         """A banner without wave paths cannot establish clearance."""
@@ -221,17 +221,17 @@ class BannerClearanceTest(unittest.TestCase):
 
     def test_missing_x_is_refused(self):
         """Missing text x produces a contextual geometry error."""
-        svg = '<svg><text font-size="10">a</text><path d="M80 0"/></svg>'
+        svg = '<svg><text font-size="10">a</text><g stroke-linejoin="round"><path stroke-width="0" d="M80 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg), ["a: missing or invalid x or font-size"])
 
     def test_missing_font_size_is_refused(self):
         """Missing text and group font-size produces a contextual error."""
-        svg = '<svg><text x="0">a</text><path d="M80 0"/></svg>'
+        svg = '<svg><text x="0">a</text><g stroke-linejoin="round"><path stroke-width="0" d="M80 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg), ["a: missing or invalid x or font-size"])
 
     def test_path_control_points_contribute_to_minimum(self):
         """A curve control point left of the move point constrains clearance."""
-        svg = '<svg><text x="0" font-size="10">abc</text><path d="M80 0 C53 0 90 0 100 0"/></svg>'
+        svg = '<svg><text x="0" font-size="10">abc</text><g stroke-linejoin="round"><path stroke-width="0" d="M80 0 C53 0 90 0 100 0"/></g></svg>'
         self.assertEqual(len(check_banner_clearance(svg, advance=1)), 1)
 
     def test_smooth_reflected_control_bounds_wave(self):
@@ -242,7 +242,7 @@ class BannerClearanceTest(unittest.TestCase):
     def test_smooth_reflection_refuses_subtitle_overlap(self):
         """A reflected point left of explicit coordinates constrains subtitles."""
         svg = ('<svg><text x="350" font-size="14">Subtitle</text>'
-               '<path d="M800 76 C800 76 1200 76 800 76 S800 76 800 76"/></svg>')
+               '<g stroke-linejoin="round"><path stroke-width="0" d="M800 76 C800 76 1200 76 800 76 S800 76 800 76"/></g></svg>')
         self.assertEqual(check_banner_clearance(svg), [
             "Subtitle: right edge 419.4 within 24 of wave start 400.0",
         ])
@@ -290,8 +290,8 @@ class BannerClearanceTest(unittest.TestCase):
                 self.assertEqual(_wave_start(path), 800)
 
     def test_text_content_is_stripped(self):
-        """Outer whitespace does not add to the estimated text width."""
-        svg = '<svg><text x="0" font-size="10"> abc </text><path d="M54 0"/></svg>'
+        """Outer XML whitespace does not add to the estimated text width."""
+        svg = '<svg><text x="0" font-size="10"> abc </text><g stroke-linejoin="round"><path stroke-width="0" d="M54 0"/></g></svg>'
         self.assertEqual(check_banner_clearance(svg, advance=1), [])
 
     def test_oversized_svg_is_refused(self):
@@ -302,3 +302,156 @@ class BannerClearanceTest(unittest.TestCase):
     def test_group_nesting_is_bounded(self):
         """Group inheritance refuses nesting beyond the scalar depth limit."""
         self.assertIn("group nesting exceeds", " ".join(check_banner_clearance("<g>" * (MAX_SVG_DEPTH + 1))))
+
+    def test_wide_real_banner_stroke_is_refused(self):
+        """The real wave's half-width contributes to its occupied envelope."""
+        svg = self.svg.replace('stroke-width="14"', 'stroke-width="140"')
+        errors = check_banner_clearance(svg)
+        # Diagnostic count is bounded by MAX_SVG_BYTES before parsing.
+        self.assertTrue(any("wave start 730.0" in error for error in errors), errors)
+
+    def test_stroke_envelope_boundary(self):
+        """A half-width envelope passes at equality and refuses one unit less."""
+        svg = ('<svg><text x="0" font-size="10">abc</text>'
+               '<g stroke-linejoin="round"><path d="M55 0" stroke-width="2"/></g></svg>')
+        self.assertIn("abc: right edge 30.0 within 24 of wave start 53.0",
+                      check_banner_clearance(svg.replace("M55", "M54"), advance=1))
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])
+
+    def test_default_stroke_width_boundary(self):
+        """An absent stroke-width defaults to one, including its half-unit edge."""
+        svg = ('<svg><text x="0" font-size="10">abc</text>'
+               '<g stroke-linejoin="bevel"><path d="M54.5 0"/></g></svg>')
+        self.assertIn("abc: right edge 30.0 within 24 of wave start 53.0",
+                      check_banner_clearance(svg.replace("M54.5", "M53.5"), advance=1))
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])
+
+    def test_missing_linejoin_is_refused(self):
+        """The default miter join cannot be bounded by a half stroke width."""
+        svg = self.svg.replace(' stroke-linejoin="round"', '')
+        self.assertIn("path: stroke-linejoin must be round or bevel",
+                      check_banner_clearance(svg))
+
+    def test_unbounded_linejoins_are_refused(self):
+        """Explicit miter and unknown joins cannot bypass the envelope check."""
+        # Two unsupported joins, both below MAX_SVG_BYTES.
+        for join in ("miter", "unknown"):
+            with self.subTest(join=join):
+                svg = self.svg.replace('stroke-linejoin="round"', f'stroke-linejoin="{join}"')
+                self.assertIn("path: stroke-linejoin must be round or bevel",
+                              check_banner_clearance(svg))
+
+    def test_square_linecap_is_refused(self):
+        """A square cap can extend farther than half a stroke width."""
+        svg = self.svg.replace('stroke-linecap="round"', 'stroke-linecap="square"')
+        self.assertIn("path: stroke-linecap must be absent, butt or round",
+                      check_banner_clearance(svg))
+
+    def test_supported_stroke_inheritance_passes(self):
+        """Nested groups inherit nearest joins and restore the parent on exit."""
+        svg = ('<svg><text x="0" font-size="10">abc</text>'
+               '<g stroke-linejoin="round" stroke-linecap="round">'
+               '<g stroke-linejoin="bevel" stroke-linecap="butt"><g>'
+               '<path d="M55 0" stroke-width="2"/></g></g>'
+               '<path d="M55 0" stroke-width="2"/></g></svg>')
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])
+
+    def test_nearest_stroke_group_override_is_refused(self):
+        """A nested square cap overrides an otherwise supported parent cap."""
+        svg = ('<svg><text x="0" font-size="10">abc</text>'
+               '<g stroke-linejoin="round" stroke-linecap="round">'
+               '<g stroke-linecap="square"><path d="M80 0"/></g></g></svg>')
+        self.assertIn("path: stroke-linecap must be absent, butt or round",
+                      check_banner_clearance(svg))
+
+    def test_invalid_stroke_width_is_refused(self):
+        """Only finite nonnegative plain numbers can bound a stroke."""
+        # Seven spellings; diagnostic iterations are bounded by MAX_SVG_BYTES.
+        for width in ("wide", "nan", "-1", "1px", "1e999", "", None):
+            with self.subTest(width=width):
+                attribute = "stroke-width" if width is None else f'stroke-width="{width}"'
+                svg = ('<svg><text x="0" font-size="10">abc</text>'
+                       f'<g stroke-linejoin="round"><path d="M80 0" {attribute}/></g></svg>')
+                self.assertTrue(any("path: stroke-width" in error
+                                    for error in check_banner_clearance(svg)))
+
+    def test_cdata_subtitles_are_refused(self):
+        """CDATA cannot hide subtitle glyphs where the waves overlap."""
+        svg = self.svg.replace("M800", "M700")
+        svg = re.sub(r'(<text x="350"[^>]*>)([^<]*)(</text>)',
+                     r'\1<![CDATA[\2]]>\3', svg)
+        self.assertEqual(check_banner_clearance(svg),
+                         ["SVG: CDATA section unsupported"] * 2)
+
+    def test_doctype_entity_is_refused(self):
+        """A DOCTYPE cannot introduce text through a declared entity."""
+        svg = '<!DOCTYPE svg [<!ENTITY subtitle "Wide subtitle">]>' + self.svg
+        svg = svg.replace("Foundational Go libraries", "&subtitle;")
+        self.assertIn("SVG: declaration unsupported", check_banner_clearance(svg))
+
+    def test_stylesheet_instruction_is_refused(self):
+        """A processing instruction cannot restyle the bounded geometry."""
+        svg = '<?xml-stylesheet href="banner.css" type="text/css"?>' + self.svg
+        self.assertEqual(check_banner_clearance(svg),
+                         ["SVG: processing instruction unsupported"])
+
+    def test_reversed_letter_spacing_is_refused(self):
+        """Negative glyph steps leave the first glyph as the rightmost one."""
+        svg = ('<svg><text x="800" font-size="14" letter-spacing="-20">abc</text>'
+               '<g stroke-linejoin="round"><path d="M800 0" stroke-width="0"/></g></svg>')
+        self.assertIn("abc: right edge 808.7 within 24 of wave start 800.0",
+                      check_banner_clearance(svg))
+
+    def test_negative_spacing_one_unit_inside_margin_fails(self):
+        """The final glyph still occupies its full advance with negative spacing."""
+        svg = ('<svg><text x="0" font-size="10" letter-spacing="-1">abc</text>'
+               '<g stroke-linejoin="round"><path d="M51 0" stroke-width="0"/></g></svg>')
+        self.assertIn("abc: right edge 28.0 within 24 of wave start 51.0",
+                      check_banner_clearance(svg, advance=1))
+
+    def test_non_xml_spaces_are_counted(self):
+        """Leading and trailing nonbreaking spaces remain occupied advances."""
+        # Two Unicode whitespace variants and both text-edge positions.
+        for space in ("\u00a0", "\u2003"):
+            for text in (space * 3 + "abc", "abc" + space * 3):
+                with self.subTest(text=text):
+                    svg = (f'<svg><text x="0" font-size="10">{text}</text>'
+                           '<g stroke-linejoin="round"><path d="M54 0" stroke-width="0"/></g></svg>')
+                    self.assertIn(f"{text}: right edge 60.0 within 24 of wave start 54.0",
+                                  check_banner_clearance(svg, advance=1))
+
+    def test_wide_glyph_boundary(self):
+        """Wide and fullwidth glyphs occupy two advances, unlike ASCII twins."""
+        svg = ('<svg><text x="0" font-size="10">abc</text>'
+               '<g stroke-linejoin="round"><path d="M54 0" stroke-width="0"/></g></svg>')
+        # W and F width classes each contain three glyphs.
+        for text in ("界界界", "ａｂｃ"):
+            with self.subTest(text=text):
+                wide = svg.replace("abc", text)
+                self.assertIn(f"{text}: right edge 60.0 within 24 of wave start 54.0",
+                              check_banner_clearance(wide, advance=1))
+                self.assertEqual(check_banner_clearance(wide.replace("M54", "M84"),
+                                                        advance=1), [])
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])
+
+    def test_zero_step_spacing_boundary(self):
+        """Coincident glyph origins still occupy one complete glyph advance."""
+        svg = ('<svg><text x="0" font-size="10" letter-spacing="-10">abc</text>'
+               '<g stroke-linejoin="round"><path d="M33 0" stroke-width="0"/></g></svg>')
+        self.assertIn("abc: right edge 10.0 within 24 of wave start 33.0",
+                      check_banner_clearance(svg, advance=1))
+        self.assertEqual(check_banner_clearance(svg.replace("M33", "M34"), advance=1), [])
+
+    def test_wide_negative_spacing_boundary(self):
+        """Reversed spacing cannot shrink a single fullwidth glyph's own width."""
+        svg = ('<svg><text x="0" font-size="10" letter-spacing="-20">ａ</text>'
+               '<g stroke-linejoin="round"><path d="M43 0" stroke-width="0"/></g></svg>')
+        self.assertIn("ａ: right edge 20.0 within 24 of wave start 43.0",
+                      check_banner_clearance(svg, advance=1))
+        self.assertEqual(check_banner_clearance(svg.replace("M43", "M44"), advance=1), [])
+
+    def test_empty_text_edge_is_x(self):
+        """Empty text has no occupied advance even with positive spacing."""
+        svg = ('<svg><text x="0" font-size="10" letter-spacing="20"> \t\n\r</text>'
+               '<g stroke-linejoin="round"><path d="M24 0" stroke-width="0"/></g></svg>')
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])

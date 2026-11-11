@@ -20,7 +20,7 @@
   <rect width="1200" height="120" rx="12" fill="url(#bg)"/>
 
   <!-- modular architecture traces: converging client and framework streams -->
-  <g fill="none" stroke-linecap="round">
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
     <path d="M800 78 C 862.6 48, 917.4 96, 980 70 S 1089.6 40, 1160 68"
           stroke="url(#wave)" stroke-width="14"/>
     <path d="M800 78 C 862.6 48, 917.4 96, 980 70 S 1089.6 40, 1160 68"
