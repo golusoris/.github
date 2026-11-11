@@ -52,7 +52,7 @@ and self-hosted applications listed under Apps.
 
 ### Templates
 
-- **[golusoris/template-native-gpu](https://github.com/golusoris/template-native-gpu)** — polyglot native C/C++ and GPU project template with Meson, SYCL/CUDA/HIP/Metal/Vulkan dispatch, FFmpeg filters, and supply-chain CI (SLSA, cosign, SBOM). BSD-2-Clause-Patent.
+- **[golusoris/template-native-gpu](https://github.com/golusoris/template-native-gpu)** — polyglot native C/C++ and GPU project template with Meson, SYCL/CUDA/HIP/Metal/Vulkan dispatch, FFmpeg filters, and supply-chain CI (SLSA, cosign, SBOM).
 
 This is a GitHub repository template; select **Use this template** to start a
 project from it.
