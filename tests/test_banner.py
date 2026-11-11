@@ -16,6 +16,101 @@ class BannerClearanceTest(unittest.TestCase):
         """Every text element in the published banner clears the wave."""
         self.assertEqual(check_banner_clearance(self.svg), [])
 
+    def test_unmodeled_elements_are_refused(self):
+        """A use copy or a text path could place glyphs the model never reads."""
+        planted = {
+            "use": '<use href="#t" x="500"/>',
+            "textpath": '<text x="0" font-size="10"><textPath href="#p">abc</textPath></text>',
+        }
+        for tag, element in planted.items():
+            with self.subTest(tag=tag):
+                svg = self.svg.replace("</svg>", element + "</svg>", 1)
+                self.assertIn(f"{tag}: unsupported element", check_banner_clearance(svg))
+
+    def test_group_transform_is_refused(self):
+        """A translated subtitle group cannot silently move text geometry."""
+        svg = self.svg.replace('<g font-family=', '<g transform="translate(500 0)" font-family=', 1)
+        self.assertEqual(check_banner_clearance(svg), ["g: transform is unsupported"])
+
+    def test_path_transform_is_refused(self):
+        """A translated path cannot silently move the wave boundary."""
+        svg = self.svg.replace('<path d=', '<path transform="translate(-500 0)" d=', 1)
+        self.assertIn("path: transform is unsupported", check_banner_clearance(svg))
+
+    def test_other_element_transforms_are_refused(self):
+        """Transforms are refused even on elements outside the allow-list."""
+        for tag in ("svg", "defs", "linearGradient", "stop", "rect"):
+            with self.subTest(tag=tag):
+                svg = self.svg.replace(f"<{tag}", f'<{tag} transform="translate(500 0)"', 1)
+                self.assertIn(f"{tag.lower()}: transform is unsupported", check_banner_clearance(svg))
+
+    def test_supported_opacity_attributes_pass(self):
+        """Decorative opacity attributes do not change text clearance."""
+        svg = ('<svg><g opacity="0.5"><text x="0" font-size="10" opacity="0.5">'
+               'a<tspan fill="red" opacity="0.5">bc</tspan></text></g>'
+               '<path d="M54 0" fill-opacity="0.5" stroke-opacity="0.5"/></svg>')
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])
+
+    def test_text_anchor_is_refused(self):
+        """Text anchoring cannot silently shift the estimated right edge."""
+        svg = self.svg.replace('<text x=', '<text text-anchor="end" x=', 1)
+        self.assertIn("text: unsupported attribute text-anchor", check_banner_clearance(svg))
+
+    def test_tspan_position_is_refused(self):
+        """An independently positioned tspan cannot silently move glyphs."""
+        svg = self.svg.replace('<tspan fill=', '<tspan x="500" fill=', 1)
+        self.assertIn("tspan: unsupported attribute x", check_banner_clearance(svg))
+
+    def test_text_style_is_refused(self):
+        """Inline CSS cannot override the font-size used for clearance."""
+        svg = self.svg.replace('<text x=', '<text style="font-size:40px" x=', 1)
+        self.assertIn("text: unsupported attribute style", check_banner_clearance(svg))
+
+    def test_group_letter_spacing_is_refused(self):
+        """Letter-spacing inheritance is refused instead of ignored."""
+        svg = self.svg.replace('<g font-family=', '<g letter-spacing="2" font-family=', 1)
+        self.assertIn("g: unsupported attribute letter-spacing", check_banner_clearance(svg))
+
+    def test_unsupported_attributes_are_sorted_and_geometry_collected(self):
+        """All unsupported attributes and a clearance error are reported."""
+        svg = ('<svg><text x="0" font-size="10" textLength="20" dx="2">abc</text>'
+               '<path d="M50 0"/></svg>')
+        self.assertEqual(check_banner_clearance(svg, advance=1), [
+            "text: unsupported attribute dx",
+            "text: unsupported attribute textlength",
+            "abc: right edge 30.0 within 24 of wave start 50.0",
+        ])
+
+    def test_letter_spacing_exact_margin_passes(self):
+        """Positive spacing counts once per glyph at the exact margin."""
+        svg = '<svg><text x="0" font-size="10" letter-spacing="1">abc</text><path d="M57 0"/></svg>'
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])
+
+    def test_letter_spacing_one_unit_inside_margin_fails(self):
+        """Positive spacing moves the right edge one unit into the margin."""
+        svg = '<svg><text x="0" font-size="10" letter-spacing="1">abc</text><path d="M56 0"/></svg>'
+        self.assertEqual(check_banner_clearance(svg, advance=1), [
+            "abc: right edge 33.0 within 24 of wave start 56.0",
+        ])
+
+    def test_negative_letter_spacing_passes(self):
+        """Negative spacing narrows the text to the exact clearance boundary."""
+        svg = '<svg><text x="0" font-size="10" letter-spacing="-1">abc</text><path d="M51 0"/></svg>'
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])
+
+    def test_invalid_letter_spacing_is_refused(self):
+        """Non-numeric and non-finite spacing produce contextual errors."""
+        for spacing in ("wide", "nan", "inf", "-inf", "1e999", ""):
+            with self.subTest(spacing=spacing):
+                svg = (f'<svg><text x="0" font-size="10" letter-spacing="{spacing}">abc</text>'
+                       '<path d="M80 0"/></svg>')
+                self.assertEqual(check_banner_clearance(svg), ["abc: invalid letter-spacing"])
+
+    def test_valueless_letter_spacing_is_refused(self):
+        """A present letter-spacing attribute requires a numeric value."""
+        svg = '<svg><text x="0" font-size="10" letter-spacing>abc</text><path d="M80 0"/></svg>'
+        self.assertEqual(check_banner_clearance(svg), ["abc: invalid letter-spacing"])
+
     def test_original_wave_start_overlaps_subtitles(self):
         """Moving the waves back to x=700 flags both monospace subtitles."""
         errors = check_banner_clearance(self.svg.replace("M800", "M700"))

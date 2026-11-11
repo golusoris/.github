@@ -41,6 +41,25 @@ MAX_SVG_DEPTH = 100
 
 SVG_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 
+# Geometry-affecting attributes must be modeled before accepting them.
+BANNER_ATTRIBUTES = {
+    "g": frozenset({"fill", "stroke-linecap", "font-family", "font-size", "opacity"}),
+    "text": frozenset({
+        "x", "y", "font-family", "font-size", "font-weight", "fill", "letter-spacing", "opacity",
+    }),
+    "tspan": frozenset({"fill", "opacity"}),
+    "path": frozenset({
+        "d", "stroke", "stroke-width", "stroke-dasharray", "opacity", "fill-opacity",
+        "stroke-opacity",
+    }),
+}
+# Elements the clearance model reads or that carry no glyph geometry; any other
+# element (use, textPath, image, foreignObject, ...) could place text unmodeled.
+BANNER_ELEMENTS = frozenset({
+    "svg", "title", "desc", "defs", "lineargradient", "stop", "rect", "g", "text", "tspan",
+    "path",
+})
+
 # Answer values the bestpractices.dev autofill file accepts per criterion.
 STATUS_VALUES = frozenset({"Met", "Unmet", "N/A", "?"})
 ANSWER_KEY = re.compile(r"[a-z0-9_]+_(status|justification)")
@@ -345,6 +364,23 @@ def _wave_start(path):
     return min(numbers[::2])
 
 
+def _attribute_errors(tag, attributes):
+    """Return unsupported elements, transforms and attributes in deterministic order."""
+    errors = []
+    if tag not in BANNER_ELEMENTS:
+        errors.append(f"{tag}: unsupported element")
+    if "transform" in attributes:
+        errors.append(f"{tag}: transform is unsupported")
+    if tag in BANNER_ATTRIBUTES:
+        # Attribute lists are bounded by MAX_SVG_BYTES before parsing; a
+        # transform is reported once, above.
+        errors.extend(
+            f"{tag}: unsupported attribute {name}"
+            for name in sorted(set(attributes) - BANNER_ATTRIBUTES[tag] - {"transform"})
+        )
+    return errors
+
+
 class _BannerParser(HTMLParser):
     """Collect SVG text geometry and absolute paths with bounded group nesting."""
 
@@ -360,6 +396,7 @@ class _BannerParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         """Collect geometry and inherit font-size from the nearest group."""
         attributes = dict(attrs)
+        self.errors.extend(_attribute_errors(tag, attributes))
         inherited = self.groups[-1] if self.groups else None
         if tag == "g":
             if len(self.groups) >= MAX_SVG_DEPTH:
@@ -368,7 +405,10 @@ class _BannerParser(HTMLParser):
         elif tag == "text":
             if self.active_text is not None:
                 raise ValueError("SVG: nested text elements unsupported")
-            self.active_text = (attributes.get("x"), attributes.get("font-size", inherited), [])
+            self.active_text = (
+                attributes.get("x"), attributes.get("font-size", inherited), [],
+                attributes.get("letter-spacing", 0),
+            )
         elif tag == "path":
             try:
                 self.paths.append(_wave_start(attributes.get("d") or ""))
@@ -385,21 +425,27 @@ class _BannerParser(HTMLParser):
         if tag == "g" and self.groups:
             self.groups.pop()
         elif tag == "text" and self.active_text is not None:
-            x, font_size, fragments = self.active_text
-            self.texts.append(("".join(fragments).strip(), x, font_size))
+            x, font_size, fragments, letter_spacing = self.active_text
+            self.texts.append(("".join(fragments).strip(), x, font_size, letter_spacing))
             self.active_text = None
 
 
 def _banner_text_errors(record, wave_start, margin, advance):
     """Return missing geometry or insufficient clearance errors for one text."""
-    text, x, font_size = record
+    text, x, font_size, letter_spacing = record
     try:
         x, font_size = float(x), float(font_size)
     except (TypeError, ValueError):
         return [f"{text}: missing or invalid x or font-size"]
     if not math.isfinite(x) or not math.isfinite(font_size) or font_size <= 0:
         return [f"{text}: x and font-size must be finite; font-size must be positive"]
-    edge = x + len(text) * advance * font_size
+    try:
+        letter_spacing = float(letter_spacing)
+    except (TypeError, ValueError):
+        return [f"{text}: invalid letter-spacing"]
+    if not math.isfinite(letter_spacing):
+        return [f"{text}: invalid letter-spacing"]
+    edge = x + len(text) * (advance * font_size + letter_spacing)
     if edge > wave_start - margin:
         return [f"{text}: right edge {edge:.1f} within {margin} of wave start {wave_start:.1f}"]
     return []
