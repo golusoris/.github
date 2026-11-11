@@ -5,9 +5,12 @@ an empty list means the input passes. The test modules run every check
 against the real repository files and against planted defects.
 """
 
+import math
 import re
+import unicodedata
 from datetime import date, timedelta
 from html.parser import HTMLParser
+from itertools import islice
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -34,11 +37,72 @@ MAX_LABELS = 1000
 MAX_ANSWER_KEYS = 2000
 MAX_MARKDOWN_BYTES = 1_000_000
 MAX_MARKDOWN_FILES = 1000
+MAX_REPOSITORIES = 1000
+REPOSITORY_FLAGS = ("archived", "fork", "private")
+MAX_SVG_BYTES = 1_000_000
+MAX_SVG_DEPTH = 100
+
+# ASCII-only on purpose; a decimal point requires following digits (CSS number token).
+SVG_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+# Geometry-affecting attributes must be modeled before accepting them.
+BANNER_ATTRIBUTES = {
+    "svg": frozenset({"xmlns", "viewbox", "width", "height", "role", "aria-label"}),
+    "defs": frozenset(),
+    "lineargradient": frozenset({"id", "x1", "y1", "x2", "y2"}),
+    "stop": frozenset({"offset", "stop-color", "stop-opacity"}),
+    "rect": frozenset({"width", "height", "rx", "fill"}),
+    "title": frozenset(),
+    "desc": frozenset(),
+    "g": frozenset({
+        "fill", "stroke-linecap", "stroke-linejoin", "font-family", "font-size", "opacity",
+    }),
+    "text": frozenset({
+        "x", "y", "font-family", "font-size", "font-weight", "fill", "letter-spacing", "opacity",
+    }),
+    "tspan": frozenset({"fill", "opacity"}),
+    "path": frozenset({
+        "d", "stroke", "stroke-width", "stroke-dasharray", "opacity", "fill-opacity",
+        "stroke-opacity",
+    }),
+}
+# Elements the clearance model reads or that carry no glyph geometry; any other
+# element (use, textPath, image, foreignObject, ...) could place text unmodeled.
+BANNER_ELEMENTS = frozenset(BANNER_ATTRIBUTES)
+# Only these allowed SVG names differ from HTMLParser's lowercase lookup keys.
+BANNER_CANONICAL_NAMES = {"viewbox": "viewBox", "lineargradient": "linearGradient"}
+# len(BANNER_ATTRIBUTES) bounds tags; each finite allow-list bounds alternatives.
+BANNER_START_TAGS = {
+    tag: re.compile(
+        "<" + re.escape(BANNER_CANONICAL_NAMES.get(tag, tag))
+        + (r'(?:\s+(?:' + "|".join(
+            re.escape(BANNER_CANONICAL_NAMES.get(name, name)) for name in sorted(attributes)
+        ) + r')="[^"<]*")*' if attributes else "")
+        + r"\s*/?>"
+    )
+    for tag, attributes in BANNER_ATTRIBUTES.items()
+}
+
 MAX_LINK_EXCEPTIONS = 100
+EXCEPTION_PREFIX = "# exception | "
 LINK_EXCEPTION_KEYS = ("file", "rule", "category", "entered", "expires", "reason")
 MAX_LINK_EXCEPTION_FIELDS = len(LINK_EXCEPTION_KEYS) + 1
 LINK_EXCEPTION_DATE_KEYS = ("entered", "expires")
 LINK_EXCEPTION_DAYS = {"B": 3, "C": 10, "D": 120}
+
+# Cap source discovery and each read; these also bound all suppression line scans.
+MAX_SUPPRESSION_FILES = 100
+MAX_SUPPRESSION_BYTES = 1_000_000
+# Python comment directives that disable lint, type, security, coverage or format
+# checks: nosec, nosemgrep, noqa (also ruff/flake8), type: ignore, pyright, pylint,
+# mypy, pragma: no cover/no branch, fmt: off/skip, isort: skip/off/skip_file.
+SUPPRESSION_MARKER = re.compile(
+    r"#\s*(?:nosec\b|nosemgrep\b|(?:(?:ruff|flake8)\s*:\s*)?noqa\b|"
+    r"type\s*:\s*ignore\b|(?:pyright|pylint|mypy)\s*:|"
+    r"pragma\s*:\s*no\s+(?:cover|branch)\b|fmt\s*:\s*(?:off|skip)\b|"
+    r"isort\s*:\s*(?:skip_file|skip|off)\b)",
+    re.IGNORECASE,
+)
 
 # Answer values the bestpractices.dev autofill file accepts per criterion.
 STATUS_VALUES = frozenset({"Met", "Unmet", "N/A", "?"})
@@ -90,8 +154,8 @@ class MarkdownTooLarge(ValueError):
     """A Markdown file is larger than MAX_MARKDOWN_BYTES."""
 
 
-def _html_targets(fragment):
-    """Return the (target, is_image) pairs of one raw HTML fragment.
+def _html_targets(fragment, *, hyperlinks_only=False):
+    """Return HTML target/type pairs, optionally restricted to anchor hrefs.
 
     Each fragment gets its own parser, closed at the end, so an unfinished
     tag in one fragment cannot join the text of the next.
@@ -99,7 +163,9 @@ def _html_targets(fragment):
     parser = _LinkHTMLParser()
     parser.feed(fragment)
     parser.close()
-    return parser.drain()
+    # Targets are bounded by the caller's finite Markdown input.
+    return [(target, is_image) for target, is_image in parser.drain()
+            if not hyperlinks_only or not is_image]
 
 
 def check_label(entry, index):
@@ -255,37 +321,33 @@ def check_test_policy(text):
     return [f"README.md: test policy lacks {fragment!r}" for fragment in TEST_POLICY_FRAGMENTS if fragment not in collapsed]
 
 
-def _extract_targets(text):
-    """Return all targets in document order and the set of image targets."""
+def _token_targets(token, *, hyperlinks_only):
+    """Return typed targets from one Markdown token using shared HTML parsing."""
+    if token.type == "link_open":
+        href = token.attrGet("href")
+        return [(href, False)] if href else []
+    if token.type == "image" and not hyperlinks_only:
+        src = token.attrGet("src")
+        return [(src, True)] if src else []
+    if token.type in {"html_block", "html_inline"} and token.content:
+        return _html_targets(token.content, hyperlinks_only=hyperlinks_only)
+    return []
+
+
+def _extract_targets(text, *, hyperlinks_only=False):
+    """Return targets in document order, optionally restricted to hyperlinks."""
     env = {}
     tokens = MarkdownIt("commonmark").enable("table").parse(text, env)
-    targets = []
-    image_targets = set()
-    # Token loops are bounded by MAX_MARKDOWN_BYTES since MarkdownIt parses
-    # a finite input string whose length is capped prior to parsing.
+    targets, image_targets = [], set()
+    # Token and target loops are bounded by MAX_MARKDOWN_BYTES in callers.
     for block in tokens:
-        if block.type == "html_block" and block.content:
-            for target, is_image in _html_targets(block.content):
+        for token in (block, *(block.children or [])):
+            for target, is_image in _token_targets(token, hyperlinks_only=hyperlinks_only):
                 targets.append(target)
                 if is_image:
                     image_targets.add(target)
-        for token in block.children or []:
-            if token.type == "link_open":
-                href = token.attrGet("href")
-                if href:
-                    targets.append(href)
-            elif token.type == "image":
-                src = token.attrGet("src")
-                if src:
-                    targets.append(src)
-                    image_targets.add(src)
-            elif token.type == "html_inline" and token.content:
-                for target, is_image in _html_targets(token.content):
-                    targets.append(target)
-                    if is_image:
-                        image_targets.add(target)
-    references = env.get("references", {})
-    for label in sorted(references):
+    references = {} if hyperlinks_only else env.get("references", {})
+    for label in sorted(references):  # Also bounded by the finite input length.
         href = references[label].get("href")
         if href is not None:
             targets.append(href)
@@ -302,6 +364,267 @@ def link_targets(text):
     """
     targets, _ = _extract_targets(text)
     return targets
+
+
+def hyperlink_targets(text):
+    """Return used Markdown and HTML anchor hrefs, excluding image sources."""
+    targets, _ = _extract_targets(text, hyperlinks_only=True)
+    return targets
+
+
+def profile_repositories(repositories, self_name=".github"):
+    """Return public, original, active repositories within the collection bound."""
+    included = []
+    for index, repository in enumerate(repositories):
+        if index >= MAX_REPOSITORIES:
+            raise ValueError(f"more than {MAX_REPOSITORIES} repositories")
+        if repository["name"].casefold() == self_name.casefold():
+            continue
+        if not any(repository[key] for key in REPOSITORY_FLAGS):
+            included.append(repository)
+    return included
+
+
+def unlisted_repositories(profile_text, owner, repositories, self_name=".github"):
+    """Return sorted errors for public repositories without an exact root link."""
+    if len(profile_text) > MAX_MARKDOWN_BYTES:
+        raise ValueError(f"profile/README.md: more than {MAX_MARKDOWN_BYTES} characters")
+    # Target count is bounded by MAX_MARKDOWN_BYTES before Markdown parsing.
+    targets = {target.removesuffix("/").casefold() for target in hyperlink_targets(profile_text)}
+    included = profile_repositories(repositories, self_name)
+    return sorted(
+        f"profile/README.md: public repository {owner}/{repository['name']} has no link"
+        for repository in included
+        if f"https://github.com/{owner}/{repository['name']}".casefold() not in targets
+    )
+
+
+def _svg_number(value):
+    """Return a finite plain SVG number, refusing other attribute spellings."""
+    if not isinstance(value, str) or not SVG_NUMBER.fullmatch(value):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _path_coordinates(tokens, count):
+    """Read one finite coordinate group of at most six numeric tokens."""
+    # Tokens already come from SVG_NUMBER; float() cannot accept extra spellings.
+    # Both numeric loops have the command arity as their scalar bound (<= 6).
+    try:
+        coordinates = [float(token) for token in tokens]
+    except ValueError as error:
+        raise ValueError("wave path: missing or unpaired coordinates") from error
+    if len(coordinates) != count:
+        raise ValueError("wave path: missing or unpaired coordinates")
+    if not all(math.isfinite(number) for number in coordinates):
+        raise ValueError("wave path: coordinates must be finite")
+    return coordinates
+
+
+def _wave_start(path):
+    """Bound absolute M/L/C/S paths by explicit and reflected control x values."""
+    if re.search(r"[^MCSL\s,]", SVG_NUMBER.sub("", path)):
+        raise ValueError("wave path: only absolute M, C, S and L commands supported")
+    tokens = re.findall(r"[MCSL]|" + SVG_NUMBER.pattern, path)
+    if not tokens or tokens[0] != "M":
+        raise ValueError("wave path: must begin with M coordinates")
+    index, command, minimum = 0, "M", math.inf
+    # Cubics stay in their control-point convex hull, including S reflections.
+    current, second_control = (0.0, 0.0), None
+    counts = {"M": 2, "L": 2, "C": 6, "S": 4}
+    # Each iteration consumes at least one coordinate group; token count is
+    # the scalar upper bound, itself bounded by MAX_SVG_BYTES in the caller.
+    for _ in range(len(tokens)):
+        if index >= len(tokens):
+            break
+        if tokens[index] in counts:
+            command = tokens[index]
+            index += 1
+        count = counts[command]
+        coordinates = _path_coordinates(tokens[index:index + count], count)
+        if command == "S":
+            reflected = current[0] if second_control is None else (
+                current[0] + (current[0] - second_control[0]))
+            if not math.isfinite(reflected):
+                raise ValueError("wave path: reflected coordinates must be finite")
+            minimum = min(minimum, reflected)
+        minimum = min(minimum, *coordinates[::2])
+        current = tuple(coordinates[-2:])
+        second_control = tuple(coordinates[-4:-2]) if command in {"C", "S"} else None
+        if command == "M":
+            command = "L"
+        index += count
+    return minimum
+
+
+def _attribute_errors(tag, attributes):
+    """Return unsupported elements, transforms and attributes in deterministic order."""
+    errors = []
+    if tag not in BANNER_ELEMENTS:
+        errors.append(f"{tag}: unsupported element")
+    if "transform" in attributes:
+        errors.append(f"{tag}: transform is unsupported")
+    if tag in BANNER_ATTRIBUTES:
+        # Attribute lists are bounded by MAX_SVG_BYTES before parsing; a
+        # transform is reported once, above.
+        errors.extend(
+            f"{tag}: unsupported attribute {name}"
+            for name in sorted(set(attributes) - BANNER_ATTRIBUTES[tag] - {"transform"})
+        )
+    return errors
+
+
+def _wave_envelope(attributes, inherited):
+    """Bound a supported stroke by its control hull plus half its width."""
+    join = attributes.get("stroke-linejoin", inherited.get("stroke-linejoin"))
+    if join not in {"round", "bevel"}:
+        raise ValueError("path: stroke-linejoin must be round or bevel")
+    cap = attributes.get("stroke-linecap", inherited.get("stroke-linecap"))
+    if cap not in {None, "butt", "round"}:
+        raise ValueError("path: stroke-linecap must be absent, butt or round")
+    width = _svg_number(attributes.get("stroke-width", "1"))
+    message = "path: stroke-width must be a finite nonnegative plain number"
+    if width is None or width < 0:
+        raise ValueError(message)
+    return _wave_start(attributes.get("d") or "") - width / 2
+
+
+class _BannerParser(HTMLParser):
+    """Collect SVG text geometry and absolute paths with bounded group nesting."""
+
+    def __init__(self):
+        """Initialize text, path, error and inherited group attribute buffers."""
+        super().__init__()
+        self.groups = []
+        self.active_text = None
+        # Open descriptive element count is bounded by MAX_SVG_BYTES.
+        self.descriptive_depth = 0
+        self.texts = []
+        self.paths = []
+        self.errors = []
+        self.first_element = True
+
+    def handle_starttag(self, tag, attrs):
+        """Collect geometry and inherit font-size and stroke bounds from groups."""
+        pattern = BANNER_START_TAGS.get(tag)
+        if pattern is None or not pattern.fullmatch(self.get_starttag_text()):
+            self.errors.append(
+                f"{tag}: start tag must use exact attribute names with double-quoted values")
+        seen = set()
+        # MAX_SVG_BYTES bounds the attribute count before parsing.
+        for name, _ in attrs:
+            if name in seen:
+                self.errors.append(f"{tag}: duplicate attribute {name}")
+            seen.add(name)
+        if self.first_element and tag != "svg":
+            self.errors.append("svg: first element must be svg")
+        elif not self.first_element and tag == "svg":
+            self.errors.append("svg: nested or second svg element unsupported")
+        self.first_element = False
+        # One root viewBox scales text and waves alike; geometry stays in root user units.
+        attributes = dict(attrs)
+        self.errors.extend(_attribute_errors(tag, attributes))
+        if tag in {"title", "desc"}:
+            self.descriptive_depth += 1
+        inherited = self.groups[-1] if self.groups else {}
+        if tag == "g":
+            if len(self.groups) >= MAX_SVG_DEPTH:
+                raise ValueError(f"SVG: group nesting exceeds {MAX_SVG_DEPTH}")
+            # Three inherited keys; group count is bounded by MAX_SVG_DEPTH.
+            self.groups.append({key: attributes.get(key, inherited.get(key))
+                                for key in ("font-size", "stroke-linecap", "stroke-linejoin")})
+        elif tag == "text":
+            if self.active_text is not None:
+                raise ValueError("SVG: nested text elements unsupported")
+            self.active_text = (
+                attributes.get("x"), attributes.get("font-size", inherited.get("font-size")), [],
+                attributes.get("letter-spacing", "0"),
+            )
+        elif tag == "path":
+            try:
+                self.paths.append(_wave_envelope(attributes, inherited))
+            except ValueError as error:
+                self.errors.append(str(error))
+
+    def unknown_decl(self, data):
+        """Refuse CDATA content that HTMLParser does not emit as text."""
+        self.errors.append("SVG: CDATA section unsupported")
+
+    def handle_decl(self, decl):
+        """Refuse declarations that could define unmodeled text entities."""
+        self.errors.append("SVG: declaration unsupported")
+
+    def handle_pi(self, data):
+        """Refuse processing instructions that could restyle SVG geometry."""
+        self.errors.append("SVG: processing instruction unsupported")
+
+    def handle_data(self, data):
+        """Keep rendered text, including tspan content, outside title and desc."""
+        if self.active_text is not None and self.descriptive_depth == 0:
+            self.active_text[2].append(data)
+
+    def handle_endtag(self, tag):
+        """Close descriptive elements, text records or enclosing groups."""
+        # No raw end-tag text from HTMLParser; wrong case makes XML ill-formed,
+        # so the SVG renderer displays no text and end tags stay unchecked here.
+        if tag in {"title", "desc"} and self.descriptive_depth > 0:
+            self.descriptive_depth -= 1
+        if tag == "g" and self.groups:
+            self.groups.pop()
+        elif tag == "text" and self.active_text is not None:
+            x, font_size, fragments, letter_spacing = self.active_text
+            self.texts.append(("".join(fragments).strip(" \t\n\r"), x, font_size, letter_spacing))
+            self.active_text = None
+
+
+def _banner_text_errors(record, wave_start, margin, advance):
+    """Return missing geometry or insufficient clearance errors for one text."""
+    text, x, font_size, letter_spacing = record
+    x, font_size = _svg_number(x), _svg_number(font_size)
+    if x is None or font_size is None:
+        return [f"{text}: missing or invalid x or font-size"]
+    if font_size <= 0:
+        return [f"{text}: x and font-size must be finite; font-size must be positive"]
+    letter_spacing = _svg_number(letter_spacing)
+    if letter_spacing is None:
+        return [f"{text}: invalid letter-spacing"]
+    # Text length is bounded by MAX_SVG_BYTES; wide/fullwidth glyphs take two advances.
+    advances = sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in text)
+    count = len(text)
+    glyph_width = advance * font_size
+    # Negative steps make the first glyph rightmost; every occupied glyph keeps
+    # its full width. Extra wide-glyph advances stay occupied even with negative
+    # steps. Positive trailing spacing remains a conservative margin.
+    step = glyph_width + letter_spacing
+    edge = x if count == 0 else (
+        x + (count - 1) * max(step, 0) + glyph_width + max(letter_spacing, 0)
+        + (advances - count) * glyph_width)
+    if edge > wave_start - margin:
+        return [f"{text}: right edge {edge:.1f} within {margin} of wave start {wave_start:.1f}"]
+    return []
+
+
+def check_banner_clearance(svg_text, margin=24, advance=0.62):
+    """Return SVG text errors where the estimated right edge crowds a wave."""
+    if len(svg_text.encode("utf-8")) > MAX_SVG_BYTES:
+        return [f"SVG: more than {MAX_SVG_BYTES} bytes"]
+    parser = _BannerParser()
+    try:
+        parser.feed(svg_text)
+        parser.close()
+    except ValueError as error:
+        return [f"SVG: {error}"]
+    errors = parser.errors.copy()
+    if not parser.texts:
+        errors.append("SVG: no text elements")
+    if not parser.paths:
+        return errors + ["SVG: no wave paths"]
+    wave_start = min(parser.paths)
+    # Parser events and text records are bounded by MAX_SVG_BYTES.
+    for record in parser.texts:
+        errors.extend(_banner_text_errors(record, wave_start, margin, advance))
+    return errors
 
 
 def _relative_targets(path):
@@ -367,7 +690,7 @@ def _is_link_exception_pattern(line):
 
 def _link_exception_metadata(line):
     """Parse an ordered allow-list of non-empty exception metadata fields."""
-    if not line.startswith("# exception | "):
+    if not line.startswith(EXCEPTION_PREFIX):
         return {}, ["pattern must directly follow an exception line"]
     parts = line.split(" | ")[1:]
     if len(parts) > MAX_LINK_EXCEPTION_FIELDS:
@@ -484,7 +807,7 @@ def check_link_exceptions(text, today, root=ROOT):
     previous = ""
     # Byte cap bounds line iteration; MAX_LINK_EXCEPTIONS bounds pattern checks.
     for index, line in enumerate(lines):
-        if line.lstrip().startswith("# exception"):
+        if line.lstrip().startswith(EXCEPTION_PREFIX):
             errors.extend(_orphan_link_exception(lines, index))
         elif _is_link_exception_pattern(line):
             count += 1
@@ -493,4 +816,67 @@ def check_link_exceptions(text, today, root=ROOT):
             found = _check_link_exception(line, previous, today, root)
             errors.extend(f"line {index + 1}: {error}" for error in found)
         previous = line
+    return errors
+
+
+def _suppression_record_errors(metadata, name, today):
+    """Reuse ordered metadata and date validation for a source suppression."""
+    if not metadata.lstrip().startswith(EXCEPTION_PREFIX):
+        return ["suppression must directly follow an exception line"]
+    data, errors = _link_exception_metadata(metadata.lstrip())
+    if errors:
+        return errors
+    if data["file"] != name:
+        errors.append(f"exception file must be {name}")
+    return errors + _link_exception_dates(data, today)
+
+
+def _suppression_text_errors(text, name, today):
+    """Check adjacent records conservatively, including markers inside strings."""
+    lines = text.splitlines()
+    errors = []
+    # MAX_SUPPRESSION_BYTES bounds the lines and diagnostics for each source.
+    for index, line in enumerate(lines):
+        found = []
+        if line.lstrip().startswith(EXCEPTION_PREFIX):
+            following = lines[index + 1] if index + 1 < len(lines) else ""
+            if not SUPPRESSION_MARKER.search(following):
+                found.append("exception has no suppression directly below it")
+        if SUPPRESSION_MARKER.search(line):
+            previous = lines[index - 1] if index else ""
+            found.extend(_suppression_record_errors(previous, name, today))
+        errors.extend(f"{name}:{index + 1}: {error}" for error in found)
+    return errors
+
+
+def _suppression_file_errors(path, root, today):
+    """Read one bounded repository-owned source and contextualize read failures."""
+    name = path.relative_to(root).as_posix()
+    try:
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+            return [f"{name}: source must be a repository-owned regular file"]
+        with path.open("rb") as source:
+            content = source.read(MAX_SUPPRESSION_BYTES + 1)
+        if len(content) > MAX_SUPPRESSION_BYTES:
+            return [f"{name}: more than {MAX_SUPPRESSION_BYTES} bytes"]
+        text = content.decode("utf-8")
+    except (OSError, ValueError) as error:
+        return [f"cannot read {name}: {error}"]
+    return _suppression_text_errors(text, name, today)
+
+
+def check_suppression_exceptions(root, today):
+    """Return missing, orphaned, mismatched or expired Python suppression records."""
+    root = Path(root)
+    try:
+        # Read at most MAX_SUPPRESSION_FILES + 1 entries to detect overflow.
+        paths = list(islice(root.glob("tests/*.py"), MAX_SUPPRESSION_FILES + 1))
+    except OSError as error:
+        return [f"cannot list {root}/tests: {error}"]
+    if len(paths) > MAX_SUPPRESSION_FILES:
+        return [f"tests: more than {MAX_SUPPRESSION_FILES} Python files"]
+    errors = []
+    # Discovery above bounds this loop by MAX_SUPPRESSION_FILES.
+    for path in sorted(paths):
+        errors.extend(_suppression_file_errors(path, root, today))
     return errors

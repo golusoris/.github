@@ -1,0 +1,62 @@
+---
+# Profile repository links: checks that every public, active, non-fork org
+# repository has a root link in the profile. Pull requests run it only when
+# they touch the profile or the checks; the paths filter also keeps it out of
+# the required checks, which the declared ruleset takes from workflows that run
+# on every pull request. Weekly runs catch new public repositories without a
+# push to this repository.
+name: Profile
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'profile/**'
+      - 'tests/**'
+      - 'Makefile'
+      - '.github/workflows/profile.yml'
+  push:
+    branches: ['main']
+  schedule:
+    - cron: '30 6 * * 1'
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  repositories:
+    name: Profile repositories
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Stop on a draft pull request
+        if: github.event.pull_request.draft == true
+        shell: bash
+        env:
+          TITLE: Gate not run on a draft
+          MESSAGE: >-
+            The gate did not run because the pull request is a draft.
+            It runs when the pull request is marked ready for review.
+        run: |
+          echo "::error title=$TITLE::$MESSAGE"
+          echo "$MESSAGE" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - name: Check out the source
+        if: github.event.pull_request.draft != true
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check profile repositories
+        if: github.event.pull_request.draft != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tests"
+          "$RUNNER_TEMP/tests/bin/python" -m pip install \
+            --require-hashes -r .config/tests/requirements.txt
+          make profile-repos PYTHON="$RUNNER_TEMP/tests/bin/python"

@@ -299,6 +299,11 @@ class LinkExceptionTest(unittest.TestCase):
         text = "\n  # ordinary comment\n" + EXCEPTION + "\n" + PATTERN + "\n"
         self.assertEqual(repo_checks.check_link_exceptions(text, TODAY, self.root), [])
 
+    def test_ordinary_exception_comment_passes(self):
+        """The word exceptions does not create an orphan link record."""
+        text = "# exceptions are logged below\n" + EXCEPTION + "\n" + PATTERN + "\n"
+        self.assertEqual(repo_checks.check_link_exceptions(text, TODAY, self.root), [])
+
     def test_crlf_lines_pass(self):
         """CRLF terminators do not add whitespace to valid patterns."""
         text = EXCEPTION + "\r\n" + PATTERN + "\r\n"

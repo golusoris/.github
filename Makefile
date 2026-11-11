@@ -6,7 +6,7 @@ PRAETORCTL ?= $(shell command -v praetorctl 2>/dev/null || command -v standardsc
 # The suite needs Python 3.10 or later with PyYAML and markdown-it-py
 # (.config/tests/requirements.txt).
 PYTHON ?= python3
-.PHONY: all verify-all compile-context compile-context-verify caveman-sources audit build test
+.PHONY: all verify-all compile-context compile-context-verify caveman-sources audit build test profile-repos
 
 all: build
 
@@ -26,6 +26,10 @@ audit:
 
 test: build
 	@$(PYTHON) -B -m unittest discover -s tests -t . -v
+
+# Network check; kept outside verify-all because it needs the GitHub API.
+profile-repos:
+	@$(PYTHON) -B -m tests.profile_repos
 
 build:
 	@printf '%s\n' 'build: not applicable: this repository holds organisation profile and community files only; nothing compiles.'
