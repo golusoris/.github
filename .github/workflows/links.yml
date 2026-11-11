@@ -1,0 +1,75 @@
+---
+# External HTTPS links: checks rendered Markdown on ready pull requests that
+# touch Markdown or this check, and on main. The weekly run catches links
+# that break without a push. Dated exceptions live in .lycheeignore.
+# The paths filter keeps this out of the required checks: the declared
+# ruleset requires every workflow that runs on every pull request, and an
+# outside site being down should not block a merge.
+name: Links
+
+'on':
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '**/*.md'
+      - '.lycheeignore'
+      - 'tests/**'
+      - '.config/tests/**'
+      - '.github/workflows/links.yml'
+  push:
+    branches: ['main']
+  schedule:
+    - cron: '45 6 * * 1'
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  links:
+    name: Markdown links
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Stop on a draft pull request
+        if: github.event.pull_request.draft == true
+        shell: bash
+        env:
+          TITLE: Gate not run on a draft
+          MESSAGE: >-
+            The gate did not run because the pull request is a draft.
+            It runs when the pull request is marked ready for review.
+        run: |
+          echo "::error title=$TITLE::$MESSAGE"
+          echo "$MESSAGE" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - name: Check out the source
+        if: github.event.pull_request.draft != true
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up the test dependencies
+        if: github.event.pull_request.draft != true
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tests"
+          "$RUNNER_TEMP/tests/bin/python" -m pip install \
+            --require-hashes -r .config/tests/requirements.txt
+      - name: List Markdown files
+        if: github.event.pull_request.draft != true
+        run: >-
+          "$RUNNER_TEMP/tests/bin/python" -B -m tests.link_inputs
+          > "$RUNNER_TEMP/markdown-files.txt"
+      - name: Check external links
+        if: github.event.pull_request.draft != true
+        # yamllint disable-line rule:line-length
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          fail: true
+          args: >-
+            --no-progress --scheme https --max-retries 2 --timeout 20
+            --files-from ${{ runner.temp }}/markdown-files.txt

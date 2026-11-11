@@ -6,6 +6,7 @@ against the real repository files and against planted defects.
 """
 
 import re
+from datetime import date, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote
@@ -33,6 +34,11 @@ MAX_LABELS = 1000
 MAX_ANSWER_KEYS = 2000
 MAX_MARKDOWN_BYTES = 1_000_000
 MAX_MARKDOWN_FILES = 1000
+MAX_LINK_EXCEPTIONS = 100
+LINK_EXCEPTION_KEYS = ("file", "rule", "category", "entered", "expires", "reason")
+MAX_LINK_EXCEPTION_FIELDS = len(LINK_EXCEPTION_KEYS) + 1
+LINK_EXCEPTION_DATE_KEYS = ("entered", "expires")
+LINK_EXCEPTION_DAYS = {"B": 3, "C": 10, "D": 120}
 
 # Answer values the bestpractices.dev autofill file accepts per criterion.
 STATUS_VALUES = frozenset({"Met", "Unmet", "N/A", "?"})
@@ -352,3 +358,139 @@ def markdown_files(root=ROOT):
                 if len(discovered) > MAX_MARKDOWN_FILES:
                     raise ValueError(f"{root}: more than {MAX_MARKDOWN_FILES} markdown files")
     return sorted(discovered)
+
+
+def _is_link_exception_pattern(line):
+    """Mirror lychee 0.24.2 read_lines: only empty lines and comments skip."""
+    return line != "" and not line.lstrip().startswith("#")
+
+
+def _link_exception_metadata(line):
+    """Parse an ordered allow-list of non-empty exception metadata fields."""
+    if not line.startswith("# exception | "):
+        return {}, ["pattern must directly follow an exception line"]
+    parts = line.split(" | ")[1:]
+    if len(parts) > MAX_LINK_EXCEPTION_FIELDS:
+        return {}, ["exception keys exceed the allowed fields"]
+    fields = [part.partition(":") for part in parts]
+    keys = tuple(key for key, _, _ in fields)
+    data = {key: value.strip() for key, _, value in fields}
+    expected = LINK_EXCEPTION_KEYS
+    if data.get("category") == "A":
+        expected = expected[:3] + ("interval",) + expected[3:]
+    if keys != expected:
+        return {}, [f"exception keys must be {', '.join(expected)} in that order"]
+    if "" in data.values():
+        return {}, ["exception values must be non-empty"]
+    return data, []
+
+
+def _link_exception_days(data):
+    """Resolve a fixed category or a positive category A interval in days."""
+    category = data["category"]
+    if category in LINK_EXCEPTION_DAYS:
+        return LINK_EXCEPTION_DAYS[category], []
+    if category != "A":
+        return 0, ["exception category must be A, B, C or D"]
+    interval = data.get("interval", "")
+    if not re.fullmatch(r"[1-9][0-9]*d", interval):
+        return 0, ["category A interval must be a positive number of days, e.g. 30d"]
+    try:
+        return int(interval[:-1]), []
+    except ValueError as error:
+        return 0, [f"invalid exception interval: {error}"]
+
+
+def _link_exception_dates(data, today):
+    """Check category intervals, strict ISO dates and inclusive expiry."""
+    days, errors = _link_exception_days(data)
+    if errors:
+        return errors
+    # Both comprehensions are bounded by LINK_EXCEPTION_DATE_KEYS.
+    if not all(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", data[key])
+               for key in LINK_EXCEPTION_DATE_KEYS):
+        return ["exception dates must use YYYY-MM-DD"]
+    try:
+        entered, expires = (date.fromisoformat(data[key]) for key in LINK_EXCEPTION_DATE_KEYS)
+        expected = entered + timedelta(days=days)
+    except (ValueError, OverflowError) as error:
+        return [f"invalid exception date or interval: {error}"]
+    errors = []
+    if expires != expected:
+        errors.append(f"exception expires must equal entered + {days} days ({expected})")
+    if today > expires:
+        errors.append(f"exception expired on {expires}")
+    return errors
+
+
+def _link_exception_matches(data, pattern, root):
+    """Read bounded Markdown inside root and require a matching link target."""
+    name = data["file"]
+    try:
+        path = (root / name).resolve()
+        if not path.is_relative_to(root.resolve()):
+            return [f"exception file {name} leaves the repository"]
+        with path.open("rb") as source:
+            content = source.read(MAX_MARKDOWN_BYTES + 1)
+        if len(content) > MAX_MARKDOWN_BYTES:
+            return [f"{name}: more than {MAX_MARKDOWN_BYTES} bytes"]
+        text = content.decode("utf-8")
+    except (OSError, ValueError) as error:
+        return [f"cannot read {name}: {error}"]
+    # link_targets input and hence this iteration are capped by MAX_MARKDOWN_BYTES.
+    if not any(pattern.search(target) for target in link_targets(text)):
+        return [f"pattern matches no link in {name} (stale exception)"]
+    return []
+
+
+def _check_link_exception(pattern, metadata, today, root):
+    """Check the regex and its adjacent metadata before reading its named file."""
+    if pattern != pattern.strip():
+        return ["pattern must have no surrounding whitespace"]
+    try:
+        compiled = re.compile(pattern)
+    except re.error as error:
+        return [f"invalid pattern: {error}"]
+    data, errors = _link_exception_metadata(metadata)
+    if errors:
+        return errors
+    return _link_exception_dates(data, today) + _link_exception_matches(data, compiled, root)
+
+
+def _link_exception_lines(text):
+    """Split like Rust lines: remove CR only as part of a CRLF terminator."""
+    lines = text.split("\n")
+    # The caller's MAX_MARKDOWN_BYTES cap bounds the number of line endings.
+    for index in range(len(lines) - 1):
+        lines[index] = lines[index].removesuffix("\r")
+    return lines
+
+
+def _orphan_link_exception(lines, index):
+    """Report exception metadata without an immediately following pattern."""
+    following = lines[index + 1] if index + 1 < len(lines) else ""
+    if not _is_link_exception_pattern(following):
+        return [f"line {index + 1}: exception has no pattern directly below it"]
+    return []
+
+
+def check_link_exceptions(text, today, root=ROOT):
+    """Return invalid, expired, orphaned or stale lychee exception diagnostics."""
+    if len(text.encode("utf-8")) > MAX_MARKDOWN_BYTES:
+        return [f".lycheeignore: more than {MAX_MARKDOWN_BYTES} bytes"]
+    lines = _link_exception_lines(text)
+    errors = []
+    count = 0
+    previous = ""
+    # Byte cap bounds line iteration; MAX_LINK_EXCEPTIONS bounds pattern checks.
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("# exception"):
+            errors.extend(_orphan_link_exception(lines, index))
+        elif _is_link_exception_pattern(line):
+            count += 1
+            if count > MAX_LINK_EXCEPTIONS:
+                return errors + [f".lycheeignore: more than {MAX_LINK_EXCEPTIONS} patterns"]
+            found = _check_link_exception(line, previous, today, root)
+            errors.extend(f"line {index + 1}: {error}" for error in found)
+        previous = line
+    return errors
