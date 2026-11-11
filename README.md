@@ -52,6 +52,9 @@ The suite checks what this repository publishes to the organisation:
 - Every `.lycheeignore` pattern carries a dated exception that has not
   expired and still matches a link
   ([`tests/test_link_exceptions.py`](tests/test_link_exceptions.py)).
+- Every Python suppression under `tests/*.py` has an adjacent, dated exception
+  for that file with a valid interval and no expired or orphaned record
+  ([`tests/test_suppression_exceptions.py`](tests/test_suppression_exceptions.py)).
 
 The [Links workflow](.github/workflows/links.yml) checks external links with
 lychee on pull requests that touch Markdown or the link check, on `main` and

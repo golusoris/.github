@@ -3,7 +3,14 @@
 import re
 import unittest
 
-from .repo_checks import MAX_SVG_BYTES, MAX_SVG_DEPTH, ROOT, SVG_NUMBER, _wave_start, check_banner_clearance
+from .repo_checks import (
+    MAX_SVG_BYTES,
+    MAX_SVG_DEPTH,
+    ROOT,
+    SVG_NUMBER,
+    _wave_start,
+    check_banner_clearance,
+)
 
 
 class BannerClearanceTest(unittest.TestCase):
@@ -16,6 +23,31 @@ class BannerClearanceTest(unittest.TestCase):
     def test_real_banner_has_clearance(self):
         """Every text element in the published banner clears the wave."""
         self.assertEqual(check_banner_clearance(self.svg), [])
+
+    def test_nested_svg_viewport_is_refused(self):
+        """A subtitle viewport cannot shift both lines into the wave unnoticed."""
+        svg = self.svg.replace(
+            '<g font-family=',
+            '<svg viewBox="-500 0 1200 120" width="1200" height="120"><g font-family=', 1,
+        ).replace("  </g>\n</svg>", "  </g></svg>\n</svg>")
+        self.assertIn("svg: nested or second svg element unsupported", check_banner_clearance(svg))
+
+    def test_second_svg_root_is_refused(self):
+        """Closing the root does not permit a second SVG viewport."""
+        self.assertIn("svg: nested or second svg element unsupported",
+                      check_banner_clearance(self.svg + "<svg/>"))
+
+    def test_non_svg_first_element_is_refused(self):
+        """An otherwise supported group cannot precede or replace the SVG root."""
+        # Two first-element boundaries, both below MAX_SVG_BYTES.
+        for svg in ("<g></g>" + self.svg, self.svg.replace("<svg ", "<g ", 1)):
+            with self.subTest(svg=svg[:80]):
+                self.assertIn("svg: first element must be svg", check_banner_clearance(svg))
+
+    def test_root_viewbox_scaling_preserves_clearance(self):
+        """One root viewport scales waves and text in the same user units."""
+        svg = self.svg.replace('viewBox="0 0 1200 120"', 'viewBox="-500 0 2400 240"')
+        self.assertEqual(check_banner_clearance("<!-- banner -->\n" + svg), [])
 
     def test_unmodeled_elements_are_refused(self):
         """A use copy or a text path could place glyphs the model never reads."""
@@ -240,9 +272,8 @@ class BannerClearanceTest(unittest.TestCase):
         # Eight malformed command and numeric boundaries.
         for path in ("M800 0 C900 0", "M800 0 S900 0", "M800 0 C",
                      "800 0", "L800 0", "M800 0 M", "M800", "M1e999 0"):
-            with self.subTest(path=path):
-                with self.assertRaisesRegex(ValueError, "wave path:"):
-                    _wave_start(path)
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "wave path:"):
+                _wave_start(path)
 
     def test_real_banner_smooth_controls_keep_minimum(self):
         """All three real reflections equal 1042.6 and preserve x=800."""

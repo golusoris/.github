@@ -4,11 +4,14 @@ import argparse
 import json
 import os
 import re
-import subprocess
+
+# exception | file: tests/profile_repos.py | rule: B404 | category: D | entered: 2026-11-11 | expires: 2027-03-11 | reason: The bounded gh collector requires the standard subprocess module.
+import subprocess  # nosec B404
 import sys
 import tempfile
 import threading
 import time
+from typing import NamedTuple
 
 from .repo_checks import (
     MAX_REPOSITORIES,
@@ -25,11 +28,28 @@ REPOSITORY_KEYS = frozenset({"name", *REPOSITORY_FLAGS})
 QUERY = ".[] | {name, archived, fork, private}"
 
 
+class CollectionTimeout(Exception):
+    """Report expiry of the shared output and child-exit collection deadline."""
+
+    def __init__(self, timeout):
+        """Retain the timeout while giving offline callers a useful message."""
+        self.timeout = timeout
+        super().__init__(f"gh collection timed out after {timeout} seconds")
+
+
+class Collected(NamedTuple):
+    """Immutable exit status and decoded output from a bounded child collection."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+
 def _validate_repository(repository, line_number):
     """Refuse missing fields or invalid types with the response line number."""
     context = f"gh output line {line_number}"
     if not isinstance(repository, dict):
-        raise ValueError(f"{context}: expected a JSON object")
+        raise TypeError(f"{context}: expected a JSON object")
     if not REPOSITORY_KEYS <= repository.keys():
         missing = sorted(REPOSITORY_KEYS - repository.keys())
         raise ValueError(f"{context}: missing repository key: {', '.join(missing)}")
@@ -95,7 +115,8 @@ def _collect_output(command, timeout, limit):
     output, failures = bytearray(), []
     # Stderr writes to disk rather than a second pipe; read back only a prefix.
     with tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        # exception | file: tests/profile_repos.py | rule: B603, python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit | category: D | entered: 2026-11-11 | expires: 2027-03-11 | reason: The gh caller supplies fixed argv with a regex-validated owner and no shell.
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,  # nosec B603 # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit.dangerous-subprocess-use-audit
                                    stderr=errors, bufsize=0)
         # Fan-out bound: exactly one stdout reader, no additional workers.
         reader = threading.Thread(target=_read_output,
@@ -107,7 +128,7 @@ def _collect_output(command, timeout, limit):
                 raise ValueError(f"gh output reader could not start: {error}") from error
             reader.join(timeout=max(0, deadline - time.monotonic()))
             if reader.is_alive() or time.monotonic() >= deadline:
-                raise subprocess.TimeoutExpired(command, timeout)
+                raise CollectionTimeout(timeout)
             if failures:
                 raise ValueError(f"gh output read failed: {failures[0]}") from failures[0]
             if len(output) > limit:
@@ -115,7 +136,7 @@ def _collect_output(command, timeout, limit):
             try:
                 returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired as error:
-                raise subprocess.TimeoutExpired(command, timeout) from error
+                raise CollectionTimeout(timeout) from error
             errors.seek(0)
             try:
                 stdout = output.decode("utf-8")
@@ -123,8 +144,8 @@ def _collect_output(command, timeout, limit):
             except UnicodeDecodeError as error:
                 raise ValueError(f"gh output is not valid UTF-8: {error}") from error
             if time.monotonic() >= deadline:
-                raise subprocess.TimeoutExpired(command, timeout)
-            return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+                raise CollectionTimeout(timeout)
+            return Collected(returncode, stdout, stderr)
         finally:
             _stop_collection(process, reader)
 
@@ -136,7 +157,7 @@ def _fetch_repositories(owner):
         result = _collect_output(command, timeout=60, limit=MAX_API_OUTPUT)
     except FileNotFoundError as error:
         raise ValueError("gh executable not found") from error
-    except subprocess.TimeoutExpired as error:
+    except CollectionTimeout as error:
         raise ValueError("gh api timed out after 60 seconds") from error
     if result.returncode:
         raise ValueError(f"gh api exited {result.returncode}: {result.stderr.strip()}")
@@ -156,7 +177,7 @@ def main(argv=None) -> int:
         repositories = _fetch_repositories(owner)
         profile = (ROOT / "profile/README.md").read_text(encoding="utf-8")
         errors = unlisted_repositories(profile, owner, repositories, self_name)
-    except (OSError, ValueError) as error:
+    except (OSError, TypeError, ValueError) as error:
         print(f"profile repositories: {error}", file=sys.stderr)
         return 2
     for error in errors:  # Bounded by MAX_REPOSITORIES.

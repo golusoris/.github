@@ -2,7 +2,6 @@
 
 import io
 import json
-import subprocess
 import sys
 import unittest
 from unittest.mock import patch
@@ -130,10 +129,12 @@ class ProfileRepositoriesCLITest(unittest.TestCase):
                 expected_owner="golusoris"):
         """Capture CLI output and assert the exact bounded gh invocation."""
         output, errors = io.StringIO(), io.StringIO()
-        result = subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="API failed")
-        with patch.object(profile_repos, "_collect_output", return_value=result, side_effect=side_effect) as run:
-            with patch("sys.stdout", output), patch("sys.stderr", errors):
-                code = profile_repos.main(["--repository", "golusoris/.github"] if argv is None else argv)
+        result = profile_repos.Collected(returncode, stdout=stdout, stderr="API failed")
+        with (
+            patch.object(profile_repos, "_collect_output", return_value=result, side_effect=side_effect) as run,
+            patch("sys.stdout", output), patch("sys.stderr", errors),
+        ):
+            code = profile_repos.main(["--repository", "golusoris/.github"] if argv is None else argv)
         run.assert_called_once_with(
             ["gh", "api", "--paginate", f"orgs/{expected_owner}/repos?type=public&per_page=100", "--jq",
              ".[] | {name, archived, fork, private}"],
@@ -161,7 +162,7 @@ class ProfileRepositoriesCLITest(unittest.TestCase):
 
     def test_timeout_returns_two(self):
         """The gh subprocess timeout fails closed with deadline context."""
-        code, _, errors = self.run_cli(side_effect=subprocess.TimeoutExpired("gh", 60))
+        code, _, errors = self.run_cli(side_effect=profile_repos.CollectionTimeout(60))
         self.assertEqual(code, 2)
         self.assertIn("gh api timed out after 60 seconds", errors)
 
@@ -192,6 +193,15 @@ class ProfileRepositoriesCLITest(unittest.TestCase):
         code, _, errors = self.run_cli(stdout="[]")
         self.assertEqual(code, 2)
         self.assertIn("expected a JSON object", errors)
+
+    def test_nonobject_parser_raises_type_error(self):
+        """Every non-object JSON type keeps its response line in a TypeError."""
+        # Five JSON type boundaries after one valid object.
+        for value in ([], None, "repository", 1, True):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                TypeError, "gh output line 2: expected a JSON object"
+            ):
+                profile_repos._parse_repositories(RESPONSE.splitlines()[0] + "\n" + json.dumps(value))
 
     def test_invalid_flag_type_returns_two(self):
         """A string flag cannot hide a repository through truthiness."""
@@ -237,9 +247,32 @@ class APIOutputCollectionTest(unittest.TestCase):
         result = profile_repos._collect_output([sys.executable, "-c", "pass"], timeout=5, limit=64)
         self.assertEqual(result.stdout, "")
 
+    def test_collected_result_is_immutable(self):
+        """A successful collection cannot have its captured exit status rewritten."""
+        result = profile_repos._collect_output([sys.executable, "-c", "pass"], timeout=5, limit=64)
+        with self.assertRaises(AttributeError):
+            result.returncode = 7
+
+    def test_decode_deadline_is_inclusive(self):
+        """Decoding just before the deadline passes; reaching it raises a timeout."""
+        # Two deterministic last-clock boundaries, after collection and child exit.
+        for now in (0.999, 1.0):
+            with self.subTest(now=now), patch.object(
+                profile_repos.time, "monotonic", side_effect=(0, 0, 0, 0, now)
+            ):
+                if now < 1:
+                    result = profile_repos._collect_output(
+                        [sys.executable, "-c", "pass"], timeout=1, limit=64)
+                    self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+                else:
+                    with self.assertRaises(profile_repos.CollectionTimeout) as raised:
+                        profile_repos._collect_output(
+                            [sys.executable, "-c", "pass"], timeout=1, limit=64)
+                    self.assertEqual(raised.exception.timeout, 1)
+
     def fetch_python(self, script, children=None):
         """Run the fetch integration offline while retaining real subprocess I/O."""
-        popen = subprocess.Popen
+        popen = profile_repos.subprocess.Popen
 
         def start_python(command, **kwargs):
             """Replace only the executable, retaining the collector pipe setup."""
@@ -248,9 +281,11 @@ class APIOutputCollectionTest(unittest.TestCase):
                 children.append(child)
             return child
 
-        with patch.object(profile_repos, "MAX_API_OUTPUT", 64):
-            with patch.object(profile_repos.subprocess, "Popen", side_effect=start_python):
-                return profile_repos._fetch_repositories("owner")
+        with (
+            patch.object(profile_repos, "MAX_API_OUTPUT", 64),
+            patch.object(profile_repos.subprocess, "Popen", side_effect=start_python),
+        ):
+            return profile_repos._fetch_repositories("owner")
 
     def test_output_over_limit_kills_child(self):
         """The fetch path stops a live child after limit plus one bytes."""
@@ -265,7 +300,7 @@ class APIOutputCollectionTest(unittest.TestCase):
 
     def test_sleeping_child_hits_collection_deadline(self):
         """A silent child cannot block the bounded reader beyond its deadline."""
-        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+        with self.assertRaises(profile_repos.CollectionTimeout) as raised:
             profile_repos._collect_output(
                 [sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.1, limit=64)
         self.assertIn("timed out", str(raised.exception))
@@ -273,7 +308,7 @@ class APIOutputCollectionTest(unittest.TestCase):
 
     def test_closed_stdout_does_not_remove_exit_deadline(self):
         """A child that closes stdout must still exit before the same deadline."""
-        with self.assertRaises(subprocess.TimeoutExpired):
+        with self.assertRaises(profile_repos.CollectionTimeout):
             profile_repos._collect_output(
                 [sys.executable, "-c", "import os,time; os.close(1); time.sleep(10)"],
                 timeout=0.1, limit=64)
@@ -300,6 +335,8 @@ class APIOutputCollectionTest(unittest.TestCase):
 
     def test_parser_retains_independent_output_limit(self):
         """Parsing still refuses excess data if the collector is bypassed."""
-        with patch.object(profile_repos, "MAX_API_OUTPUT", 64):
-            with self.assertRaisesRegex(ValueError, "gh output exceeds 64"):
-                profile_repos._parse_repositories(" " * 65)
+        with (
+            patch.object(profile_repos, "MAX_API_OUTPUT", 64),
+            self.assertRaisesRegex(ValueError, "gh output exceeds 64"),
+        ):
+            profile_repos._parse_repositories(" " * 65)

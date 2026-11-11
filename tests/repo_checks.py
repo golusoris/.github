@@ -9,6 +9,7 @@ import math
 import re
 from datetime import date, timedelta
 from html.parser import HTMLParser
+from itertools import islice
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -70,6 +71,11 @@ LINK_EXCEPTION_KEYS = ("file", "rule", "category", "entered", "expires", "reason
 MAX_LINK_EXCEPTION_FIELDS = len(LINK_EXCEPTION_KEYS) + 1
 LINK_EXCEPTION_DATE_KEYS = ("entered", "expires")
 LINK_EXCEPTION_DAYS = {"B": 3, "C": 10, "D": 120}
+
+# Cap source discovery and each read; these also bound all suppression line scans.
+MAX_SUPPRESSION_FILES = 100
+MAX_SUPPRESSION_BYTES = 1_000_000
+SUPPRESSION_MARKER = re.compile(r"#\s*(?:nosec|nosemgrep|noqa)\b")
 
 # Answer values the bestpractices.dev autofill file accepts per criterion.
 STATUS_VALUES = frozenset({"Met", "Unmet", "N/A", "?"})
@@ -444,9 +450,16 @@ class _BannerParser(HTMLParser):
         self.texts = []
         self.paths = []
         self.errors = []
+        self.first_element = True
 
     def handle_starttag(self, tag, attrs):
         """Collect geometry and inherit font-size from the nearest group."""
+        if self.first_element and tag != "svg":
+            self.errors.append("svg: first element must be svg")
+        elif not self.first_element and tag == "svg":
+            self.errors.append("svg: nested or second svg element unsupported")
+        self.first_element = False
+        # One root viewBox scales text and waves alike; geometry stays in root user units.
         attributes = dict(attrs)
         self.errors.extend(_attribute_errors(tag, attributes))
         inherited = self.groups[-1] if self.groups else None
@@ -714,4 +727,67 @@ def check_link_exceptions(text, today, root=ROOT):
             found = _check_link_exception(line, previous, today, root)
             errors.extend(f"line {index + 1}: {error}" for error in found)
         previous = line
+    return errors
+
+
+def _suppression_record_errors(metadata, name, today):
+    """Reuse ordered metadata and date validation for a source suppression."""
+    if not metadata.lstrip().startswith("# exception | "):
+        return ["suppression must directly follow an exception line"]
+    data, errors = _link_exception_metadata(metadata.lstrip())
+    if errors:
+        return errors
+    if data["file"] != name:
+        errors.append(f"exception file must be {name}")
+    return errors + _link_exception_dates(data, today)
+
+
+def _suppression_text_errors(text, name, today):
+    """Check adjacent records conservatively, including markers inside strings."""
+    lines = text.splitlines()
+    errors = []
+    # MAX_SUPPRESSION_BYTES bounds the lines and diagnostics for each source.
+    for index, line in enumerate(lines):
+        found = []
+        if line.lstrip().startswith("# exception"):
+            following = lines[index + 1] if index + 1 < len(lines) else ""
+            if not SUPPRESSION_MARKER.search(following):
+                found.append("exception has no suppression directly below it")
+        if SUPPRESSION_MARKER.search(line):
+            previous = lines[index - 1] if index else ""
+            found = _suppression_record_errors(previous, name, today)
+        errors.extend(f"{name}:{index + 1}: {error}" for error in found)
+    return errors
+
+
+def _suppression_file_errors(path, root, today):
+    """Read one bounded repository-owned source and contextualize read failures."""
+    name = path.relative_to(root).as_posix()
+    try:
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+            return [f"{name}: source must be a repository-owned regular file"]
+        with path.open("rb") as source:
+            content = source.read(MAX_SUPPRESSION_BYTES + 1)
+        if len(content) > MAX_SUPPRESSION_BYTES:
+            return [f"{name}: more than {MAX_SUPPRESSION_BYTES} bytes"]
+        text = content.decode("utf-8")
+    except (OSError, ValueError) as error:
+        return [f"cannot read {name}: {error}"]
+    return _suppression_text_errors(text, name, today)
+
+
+def check_suppression_exceptions(root, today):
+    """Return missing, orphaned, mismatched or expired Python suppression records."""
+    root = Path(root)
+    try:
+        # Read at most MAX_SUPPRESSION_FILES + 1 entries to detect overflow.
+        paths = list(islice(root.glob("tests/*.py"), MAX_SUPPRESSION_FILES + 1))
+    except OSError as error:
+        return [f"cannot list {root}/tests: {error}"]
+    if len(paths) > MAX_SUPPRESSION_FILES:
+        return [f"tests: more than {MAX_SUPPRESSION_FILES} Python files"]
+    errors = []
+    # Discovery above bounds this loop by MAX_SUPPRESSION_FILES.
+    for path in sorted(paths):
+        errors.extend(_suppression_file_errors(path, root, today))
     return errors
