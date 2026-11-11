@@ -498,6 +498,8 @@ class _BannerParser(HTMLParser):
         super().__init__()
         self.groups = []
         self.active_text = None
+        # Open descriptive element count is bounded by MAX_SVG_BYTES.
+        self.descriptive_depth = 0
         self.texts = []
         self.paths = []
         self.errors = []
@@ -523,6 +525,8 @@ class _BannerParser(HTMLParser):
         # One root viewBox scales text and waves alike; geometry stays in root user units.
         attributes = dict(attrs)
         self.errors.extend(_attribute_errors(tag, attributes))
+        if tag in {"title", "desc"}:
+            self.descriptive_depth += 1
         inherited = self.groups[-1] if self.groups else {}
         if tag == "g":
             if len(self.groups) >= MAX_SVG_DEPTH:
@@ -556,14 +560,16 @@ class _BannerParser(HTMLParser):
         self.errors.append("SVG: processing instruction unsupported")
 
     def handle_data(self, data):
-        """Keep text content, including content inside tspan elements."""
-        if self.active_text is not None:
+        """Keep rendered text, including tspan content, outside title and desc."""
+        if self.active_text is not None and self.descriptive_depth == 0:
             self.active_text[2].append(data)
 
     def handle_endtag(self, tag):
-        """Finish text records or pop one enclosing group."""
+        """Close descriptive elements, text records or enclosing groups."""
         # No raw end-tag text from HTMLParser; wrong case makes XML ill-formed,
         # so the SVG renderer displays no text and end tags stay unchecked here.
+        if tag in {"title", "desc"} and self.descriptive_depth > 0:
+            self.descriptive_depth -= 1
         if tag == "g" and self.groups:
             self.groups.pop()
         elif tag == "text" and self.active_text is not None:

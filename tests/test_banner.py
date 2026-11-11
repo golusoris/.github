@@ -2,6 +2,8 @@
 
 import re
 import unittest
+from html.parser import HTMLParser
+from unittest.mock import patch
 
 from .repo_checks import (
     MAX_SVG_BYTES,
@@ -238,6 +240,79 @@ class BannerClearanceTest(unittest.TestCase):
         """Zero attributes remain valid for descriptive SVG elements."""
         svg = self.svg.replace("</svg>", "<title>Banner</title><desc>Waves</desc></svg>")
         self.assertEqual(check_banner_clearance(svg), [])
+
+    def test_title_inside_subtitle_is_not_measured(self):
+        """A long non-rendered title cannot inflate the real subtitle's width."""
+        svg = self.svg.replace('<text x="350" y="76">',
+                               '<text x="350" y="76"><title>' + 'T' * 60 + '</title>')
+        self.assertEqual(check_banner_clearance(svg), [])
+
+    def test_description_inside_subtitle_is_not_measured(self):
+        """A long non-rendered description leaves real subtitle clearance intact."""
+        svg = self.svg.replace('<text x="350" y="76">',
+                               '<text x="350" y="76"><desc>' + 'D' * 60 + '</desc>')
+        self.assertEqual(check_banner_clearance(svg), [])
+
+    def test_descriptive_text_inside_tspan_is_not_measured(self):
+        """Title and description children of a tspan add no rendered advances."""
+        subtitle = "Composable fx modules \u00b7 Zero-dependency clients"
+        # Two descriptive tags; each fixture stays below MAX_SVG_BYTES.
+        for tag in ("title", "desc"):
+            with self.subTest(tag=tag):
+                content = f'<tspan><{tag}>{"D" * 60}</{tag}>{subtitle}</tspan>'
+                self.assertEqual(check_banner_clearance(self.svg.replace(subtitle, content)), [])
+
+    def test_title_between_fragments_measures_only_rendered_text(self):
+        """AB exactly clears the margin when a long title separates A and B."""
+        svg = ('<svg><text x="749" font-size="10">A<title>' + 'T' * 60
+               + '</title>B</text><g stroke-linejoin="round">'
+               '<path d="M793 0" stroke-width="0"/></g></svg>')
+        self.assertEqual(check_banner_clearance(svg, advance=1), [])
+
+    def test_nested_descriptive_elements_are_not_measured(self):
+        """Nested metadata stays hidden with both RCDATA and older title parsing."""
+        subtitle = "Composable fx modules \u00b7 Zero-dependency clients"
+        # Two parser modes and three nesting pairs bound this fixture matrix.
+        for rcdata in ((), ("textarea", "title")):
+            for outer, inner in (("title", "desc"), ("desc", "title"), ("desc", "desc")):
+                with self.subTest(rcdata=rcdata, outer=outer, inner=inner), patch.object(
+                    HTMLParser, "RCDATA_CONTENT_ELEMENTS", rcdata, create=True,
+                ):
+                    content = (f'<{outer}>{"D" * 60}<{inner}>{"D" * 60}</{inner}>'
+                               f'{"D" * 60}</{outer}>{subtitle}')
+                    self.assertEqual(check_banner_clearance(
+                        self.svg.replace(subtitle, content)), [])
+
+    def test_title_does_not_hide_overlapping_subtitle(self):
+        """Skipping a title still refuses the rendered subtitle moved to x=560."""
+        subtitle = "Composable fx modules \u00b7 Zero-dependency clients"
+        svg = self.svg.replace('<text x="350" y="76">',
+                               '<text x="560" y="76"><title>' + 'T' * 60 + '</title>')
+        errors = check_banner_clearance(svg)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertTrue(errors[0].startswith(f"{subtitle}: right edge"), errors)
+
+    def test_rendered_text_after_title_is_measured(self):
+        """Closing a title resumes measurement before an overlapping suffix."""
+        svg = ('<svg><text x="750" font-size="10">A<title>hidden</title>B</text>'
+               '<g stroke-linejoin="round"><path d="M793 0" stroke-width="0"/></g></svg>')
+        self.assertEqual(check_banner_clearance(svg, advance=1), [
+            "AB: right edge 770.0 within 24 of wave start 793.0",
+        ])
+
+    def test_stray_title_end_does_not_hide_rendered_text(self):
+        """An unmatched title end cannot underflow the counter and hide text."""
+        svg = ('<svg><text x="750" font-size="10"></title>AB</text>'
+               '<g stroke-linejoin="round"><path d="M793 0" stroke-width="0"/></g></svg>')
+        self.assertEqual(check_banner_clearance(svg, advance=1), [
+            "AB: right edge 770.0 within 24 of wave start 793.0",
+        ])
+
+    def test_empty_title_preserves_clearance(self):
+        """An empty title leaves the real subtitle's rendered width unchanged."""
+        svg = self.svg.replace('<text x="350" y="76">',
+                               '<text x="350" y="76"><title></title>')
+        self.assertEqual(check_banner_clearance(svg), check_banner_clearance(self.svg))
 
     def test_supported_opacity_attributes_pass(self):
         """Decorative opacity attributes do not change text clearance."""
