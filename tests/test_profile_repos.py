@@ -3,11 +3,12 @@
 import io
 import json
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
 from . import profile_repos
-from .repo_checks import MAX_REPOSITORIES, ROOT, unlisted_repositories
+from .repo_checks import MAX_REPOSITORIES, ROOT, link_targets, unlisted_repositories
 
 # Public org API measurement, 2026-11-11; .github itself is intentionally skipped.
 REPOSITORY_NAMES = ("goenvoy", "golusoris", ".github", "sveltesentio", "template-native-gpu")
@@ -74,6 +75,35 @@ class ProfileRepositoriesTest(unittest.TestCase):
         self.assertEqual(len(unlisted_repositories("`[p](https://github.com/owner/project)`",
                                                   "owner", [self.repository])), 1)
 
+    def test_non_hyperlink_targets_do_not_count(self):
+        """Unused definitions and image sources cannot satisfy root coverage."""
+        url = "https://github.com/owner/project"
+        cases = (f"[unused]: {url}", f"![p]({url})", f'<img src="{url}">',
+                 f'<source srcset="{url} 1x, {url} 2x">',
+                 f'inline <img src="{url}"> text')
+        # Five non-hyperlink forms, bounded by this tuple.
+        for markdown in cases:
+            with self.subTest(markdown=markdown):
+                self.assertEqual(unlisted_repositories(markdown, "owner", [self.repository]), [
+                    "profile/README.md: public repository owner/project has no link",
+                ])
+
+    def test_used_reference_and_linked_image_count(self):
+        """Resolved reference links and an image's enclosing hyperlink count."""
+        url = "https://github.com/owner/project"
+        cases = (f"[p][r]\n\n[r]: {url}", f"[![i](x.png)]({url})",
+                 f'inline <a href="{url}">p</a> text')
+        # Three hyperlink forms at the image/reference extraction boundary.
+        for markdown in cases:
+            with self.subTest(markdown=markdown):
+                self.assertEqual(unlisted_repositories(markdown, "owner", [self.repository]), [])
+
+    def test_file_target_extractor_keeps_images_and_definitions(self):
+        """Hyperlink filtering leaves general file validation targets intact."""
+        text = '![i](image.png)\n\n[unused]: unused.md\n\n<source srcset="a.png 1x, b.png 2x">'
+        self.assertEqual(link_targets(text),
+                         ["image.png", "a.png", "b.png", "unused.md"])
+
     def test_errors_are_sorted(self):
         """Missing root links are reported in stable lexical order."""
         repositories = [dict(self.repository, name="z"), dict(self.repository, name="a")]
@@ -94,19 +124,20 @@ class ProfileRepositoriesTest(unittest.TestCase):
 
 
 class ProfileRepositoriesCLITest(unittest.TestCase):
-    """Exercise the CLI with subprocess fully mocked and without a live login."""
+    """Exercise the CLI with its byte collector mocked and without a live login."""
 
-    def run_cli(self, stdout=RESPONSE, returncode=0, side_effect=None, argv=None):
+    def run_cli(self, stdout=RESPONSE, returncode=0, side_effect=None, argv=None,
+                expected_owner="golusoris"):
         """Capture CLI output and assert the exact bounded gh invocation."""
         output, errors = io.StringIO(), io.StringIO()
         result = subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="API failed")
-        with patch.object(profile_repos.subprocess, "run", return_value=result, side_effect=side_effect) as run:
+        with patch.object(profile_repos, "_collect_output", return_value=result, side_effect=side_effect) as run:
             with patch("sys.stdout", output), patch("sys.stderr", errors):
                 code = profile_repos.main(["--repository", "golusoris/.github"] if argv is None else argv)
         run.assert_called_once_with(
-            ["gh", "api", "--paginate", "orgs/golusoris/repos?type=public&per_page=100", "--jq",
+            ["gh", "api", "--paginate", f"orgs/{expected_owner}/repos?type=public&per_page=100", "--jq",
              ".[] | {name, archived, fork, private}"],
-            capture_output=True, text=True, timeout=60, check=False,
+            timeout=60, limit=profile_repos.MAX_API_OUTPUT,
         )
         return code, output.getvalue(), errors.getvalue()
 
@@ -171,8 +202,8 @@ class ProfileRepositoriesCLITest(unittest.TestCase):
     def test_repository_environment_default(self):
         """The CLI uses GITHUB_REPOSITORY when no argument overrides it."""
         with patch.object(profile_repos, "os") as operating_system:
-            operating_system.environ = {"GITHUB_REPOSITORY": "golusoris/.github"}
-            self.assertEqual(self.run_cli(argv=[])[0], 0)
+            operating_system.environ = {"GITHUB_REPOSITORY": "elsewhere/.github"}
+            self.assertEqual(self.run_cli(argv=[], expected_owner="elsewhere")[0], 1)
 
     def test_repository_fallback(self):
         """Absent GITHUB_REPOSITORY uses the specified public organisation default."""
@@ -185,3 +216,90 @@ class ProfileRepositoriesCLITest(unittest.TestCase):
         with patch.object(profile_repos, "os") as operating_system:
             operating_system.environ = {"GITHUB_REPOSITORY": "elsewhere/.github"}
             self.assertEqual(self.run_cli()[0], 0)
+
+
+class APIOutputCollectionTest(unittest.TestCase):
+    """Exercise byte bounds and deadlines with offline Python children."""
+
+    def test_exact_output_limit_is_accepted(self):
+        """A response of exactly the byte limit is collected successfully."""
+        result = profile_repos._collect_output(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 64)"],
+            timeout=5, limit=64)
+        self.assertEqual(result.stdout, "x" * 64)
+        self.assertEqual(result.returncode, 0)
+        script = "import sys; sys.stdout.buffer.write(bytes([195,169])*32)"
+        result = profile_repos._collect_output([sys.executable, "-c", script], timeout=5, limit=64)
+        self.assertEqual(result.stdout, "é" * 32)
+
+    def test_empty_output_is_accepted(self):
+        """EOF before any bytes is the collection lower boundary."""
+        result = profile_repos._collect_output([sys.executable, "-c", "pass"], timeout=5, limit=64)
+        self.assertEqual(result.stdout, "")
+
+    def fetch_python(self, script, children=None):
+        """Run the fetch integration offline while retaining real subprocess I/O."""
+        popen = subprocess.Popen
+
+        def start_python(command, **kwargs):
+            """Replace only the executable, retaining the collector pipe setup."""
+            child = popen([sys.executable, "-c", script], **kwargs)
+            if children is not None:
+                children.append(child)
+            return child
+
+        with patch.object(profile_repos, "MAX_API_OUTPUT", 64):
+            with patch.object(profile_repos.subprocess, "Popen", side_effect=start_python):
+                return profile_repos._fetch_repositories("owner")
+
+    def test_output_over_limit_kills_child(self):
+        """The fetch path stops a live child after limit plus one bytes."""
+        children = []
+        script = "import sys,time; sys.stdout.write('x'*65); sys.stdout.flush(); time.sleep(10)"
+        with self.assertRaisesRegex(ValueError, "gh output exceeds 64"):
+            self.fetch_python(script, children)
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].returncode)
+        self.assertNotEqual(children[0].returncode, 0)
+        self.assertIsNotNone(children[0].poll())
+
+    def test_sleeping_child_hits_collection_deadline(self):
+        """A silent child cannot block the bounded reader beyond its deadline."""
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            profile_repos._collect_output(
+                [sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.1, limit=64)
+        self.assertIn("timed out", str(raised.exception))
+        self.assertEqual(raised.exception.timeout, 0.1)
+
+    def test_closed_stdout_does_not_remove_exit_deadline(self):
+        """A child that closes stdout must still exit before the same deadline."""
+        with self.assertRaises(subprocess.TimeoutExpired):
+            profile_repos._collect_output(
+                [sys.executable, "-c", "import os,time; os.close(1); time.sleep(10)"],
+                timeout=0.1, limit=64)
+
+    def test_nonzero_exit_keeps_bounded_stderr(self):
+        """Large stderr cannot deadlock and only a fixed prefix is retained."""
+        script = "import sys; sys.stderr.write('API failed'+'x'*100000); sys.exit(7)"
+        result = profile_repos._collect_output([sys.executable, "-c", script], timeout=5, limit=64)
+        self.assertEqual(result.returncode, 7)
+        self.assertTrue(result.stderr.startswith("API failed"))
+        self.assertEqual(len(result.stderr), profile_repos.MAX_API_STDERR)
+
+    def test_invalid_utf8_is_refused_with_context(self):
+        """Invalid bytes are reported as a contextual collection ValueError."""
+        script = "import sys; sys.stdout.buffer.write(bytes([255]))"
+        with self.assertRaisesRegex(ValueError, "gh output.*UTF-8"):
+            self.fetch_python(script)
+
+    def test_limit_counts_bytes_before_utf8_decoding(self):
+        """Multibyte text consumes its encoded byte length in the reader."""
+        script = "import sys; sys.stdout.buffer.write(bytes([195,169])*33)"
+        with self.assertRaisesRegex(ValueError, "gh output exceeds 64"):
+            self.fetch_python(script)
+
+    def test_parser_retains_independent_output_limit(self):
+        """Parsing still refuses excess data if the collector is bypassed."""
+        with patch.object(profile_repos, "MAX_API_OUTPUT", 64):
+            with self.assertRaisesRegex(ValueError, "gh output exceeds 64"):
+                profile_repos._parse_repositories(" " * 65)

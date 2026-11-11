@@ -1,8 +1,9 @@
 """Banner text stays clear of the decorative waves, including planted defects."""
 
+import re
 import unittest
 
-from .repo_checks import MAX_SVG_BYTES, MAX_SVG_DEPTH, ROOT, check_banner_clearance
+from .repo_checks import MAX_SVG_BYTES, MAX_SVG_DEPTH, ROOT, SVG_NUMBER, _wave_start, check_banner_clearance
 
 
 class BannerClearanceTest(unittest.TestCase):
@@ -42,7 +43,31 @@ class BannerClearanceTest(unittest.TestCase):
         for tag in ("svg", "defs", "linearGradient", "stop", "rect"):
             with self.subTest(tag=tag):
                 svg = self.svg.replace(f"<{tag}", f'<{tag} transform="translate(500 0)"', 1)
-                self.assertIn(f"{tag.lower()}: transform is unsupported", check_banner_clearance(svg))
+                self.assertEqual(check_banner_clearance(svg), [f"{tag.lower()}: transform is unsupported"])
+
+    def test_root_inherited_geometry_is_refused(self):
+        """Root CSS and inherited font metrics cannot evade attribute checks."""
+        # Three planted attributes; each input remains below MAX_SVG_BYTES.
+        for attribute in ('style="letter-spacing:20px"', 'font-size="40"',
+                          'letter-spacing="20"'):
+            with self.subTest(attribute=attribute):
+                svg = self.svg.replace('<svg ', f'<svg {attribute} ', 1)
+                name = attribute.split("=", 1)[0]
+                self.assertEqual(check_banner_clearance(svg), [f"svg: unsupported attribute {name}"])
+
+    def test_decorative_element_attributes_are_refused(self):
+        """Every non-text element refuses an attribute outside its exact set."""
+        # Six allowed tags, including the zero-attribute title/desc boundary.
+        for tag in ("defs", "linearGradient", "stop", "rect", "title", "desc"):
+            with self.subTest(tag=tag):
+                svg = self.svg.replace("</svg>", f'<{tag} style="font-size:40px"/></svg>')
+                self.assertEqual(check_banner_clearance(svg),
+                                 [f"{tag.lower()}: unsupported attribute style"])
+
+    def test_attribute_free_title_and_description_pass(self):
+        """Zero attributes remain valid for descriptive SVG elements."""
+        svg = self.svg.replace("</svg>", "<title>Banner</title><desc>Waves</desc></svg>")
+        self.assertEqual(check_banner_clearance(svg), [])
 
     def test_supported_opacity_attributes_pass(self):
         """Decorative opacity attributes do not change text clearance."""
@@ -176,6 +201,62 @@ class BannerClearanceTest(unittest.TestCase):
         """A curve control point left of the move point constrains clearance."""
         svg = '<svg><text x="0" font-size="10">abc</text><path d="M80 0 C53 0 90 0 100 0"/></svg>'
         self.assertEqual(len(check_banner_clearance(svg, advance=1)), 1)
+
+    def test_smooth_reflected_control_bounds_wave(self):
+        """A smooth cubic includes its implicit reflected first control point."""
+        path = "M800 76 C800 76 1200 76 800 76 S800 76 800 76"
+        self.assertEqual(_wave_start(path), 400)
+
+    def test_smooth_reflection_refuses_subtitle_overlap(self):
+        """A reflected point left of explicit coordinates constrains subtitles."""
+        svg = ('<svg><text x="350" font-size="14">Subtitle</text>'
+               '<path d="M800 76 C800 76 1200 76 800 76 S800 76 800 76"/></svg>')
+        self.assertEqual(check_banner_clearance(svg), [
+            "Subtitle: right edge 419.4 within 24 of wave start 400.0",
+        ])
+
+    def test_smooth_without_cubic_uses_current_point(self):
+        """M and L reset smooth reflection to the current point."""
+        # Two previous-command boundaries.
+        for path in ("M800 0 S900 0 1000 0",
+                     "M800 0 C800 0 1200 0 800 0 L800 0 S900 0 1000 0"):
+            with self.subTest(path=path):
+                self.assertEqual(_wave_start(path), 800)
+
+    def test_implicit_path_segments_update_reflection(self):
+        """Repeated M, C and S groups obey segment and reflection semantics."""
+        cases = {
+            "M900 0 800 0 S900 0 1000 0": 800,
+            "M800 0 C800 0 800 0 800 0 800 0 1200 0 800 0 S800 0 800 0": 400,
+            "M800 0 S1200 0 800 0 800 0 800 0": 400,
+        }
+        # Three finite command sequences, bounded by their token counts.
+        for path, minimum in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(_wave_start(path), minimum)
+
+    def test_incomplete_path_segments_are_refused(self):
+        """Even coordinate counts cannot hide incomplete cubic segments."""
+        # Eight malformed command and numeric boundaries.
+        for path in ("M800 0 C900 0", "M800 0 S900 0", "M800 0 C",
+                     "800 0", "L800 0", "M800 0 M", "M800", "M1e999 0"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "wave path:"):
+                    _wave_start(path)
+
+    def test_real_banner_smooth_controls_keep_minimum(self):
+        """All three real reflections equal 1042.6 and preserve x=800."""
+        paths = re.findall(r'<path d="([^"]+)"', self.svg)
+        self.assertEqual(len(paths), 3)
+        # Exactly three paths in the published banner.
+        for path in paths:
+            with self.subTest(path=path):
+                segment = path.split("C", 1)[1].split("S", 1)[0]
+                # A cubic segment has exactly six explicit coordinates.
+                coordinates = [float(number) for number in SVG_NUMBER.findall(segment)]
+                self.assertEqual(len(coordinates), 6)
+                self.assertAlmostEqual(2 * coordinates[-2] - coordinates[-4], 1042.6)
+                self.assertEqual(_wave_start(path), 800)
 
     def test_text_content_is_stripped(self):
         """Outer whitespace does not add to the estimated text width."""

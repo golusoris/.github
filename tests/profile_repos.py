@@ -6,6 +6,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 
 from .repo_checks import (
     MAX_REPOSITORIES,
@@ -16,6 +19,8 @@ from .repo_checks import (
 )
 
 MAX_API_OUTPUT = 1_000_000
+MAX_API_STDERR = 4096
+COLLECTION_CLEANUP_TIMEOUT = 5
 REPOSITORY_KEYS = frozenset({"name", *REPOSITORY_FLAGS})
 QUERY = ".[] | {name, archived, fork, private}"
 
@@ -54,11 +59,81 @@ def _parse_repositories(stdout):
     return repositories
 
 
+def _read_output(stream, limit, output, failures):
+    """Read at most limit plus one bytes in a single bounded worker."""
+    try:
+        # Every nonempty read adds at least one byte, so limit + 1 bounds
+        # iterations; the extra byte detects overflow without capturing more.
+        for _ in range(limit + 1):
+            chunk = stream.read(min(65536, limit + 1 - len(output)))
+            if not chunk:
+                return
+            output.extend(chunk)
+            if len(output) > limit:
+                return
+    except (OSError, ValueError) as error:
+        failures.append(error)
+
+
+def _stop_collection(process, reader):
+    """Reap a live child and release its one reader with bounded cleanup."""
+    try:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=COLLECTION_CLEANUP_TIMEOUT)
+    finally:
+        if reader.ident is not None:
+            reader.join(timeout=COLLECTION_CLEANUP_TIMEOUT)
+        process.stdout.close()
+    if reader.is_alive():
+        raise ValueError("gh output reader did not stop after child termination")
+
+
+def _collect_output(command, timeout, limit):
+    """Collect bounded bytes portably under one deadline, then decode UTF-8."""
+    deadline = time.monotonic() + timeout
+    output, failures = bytearray(), []
+    # Stderr writes to disk rather than a second pipe; read back only a prefix.
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=errors, bufsize=0)
+        # Fan-out bound: exactly one stdout reader, no additional workers.
+        reader = threading.Thread(target=_read_output,
+                                  args=(process.stdout, limit, output, failures), daemon=True)
+        try:
+            try:
+                reader.start()
+            except RuntimeError as error:
+                raise ValueError(f"gh output reader could not start: {error}") from error
+            reader.join(timeout=max(0, deadline - time.monotonic()))
+            if reader.is_alive() or time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            if failures:
+                raise ValueError(f"gh output read failed: {failures[0]}") from failures[0]
+            if len(output) > limit:
+                raise ValueError(f"gh output exceeds {limit} bytes")
+            try:
+                returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired as error:
+                raise subprocess.TimeoutExpired(command, timeout) from error
+            errors.seek(0)
+            try:
+                stdout = output.decode("utf-8")
+                stderr = errors.read(MAX_API_STDERR).decode("utf-8", errors="replace")
+            except UnicodeDecodeError as error:
+                raise ValueError(f"gh output is not valid UTF-8: {error}") from error
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+        finally:
+            _stop_collection(process, reader)
+
+
 def _fetch_repositories(owner):
     """Fetch all public repositories through gh with an explicit I/O deadline."""
     command = ["gh", "api", "--paginate", f"orgs/{owner}/repos?type=public&per_page=100", "--jq", QUERY]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        result = _collect_output(command, timeout=60, limit=MAX_API_OUTPUT)
     except FileNotFoundError as error:
         raise ValueError("gh executable not found") from error
     except subprocess.TimeoutExpired as error:

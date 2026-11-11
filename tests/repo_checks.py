@@ -43,6 +43,13 @@ SVG_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 
 # Geometry-affecting attributes must be modeled before accepting them.
 BANNER_ATTRIBUTES = {
+    "svg": frozenset({"xmlns", "viewbox", "width", "height", "role", "aria-label"}),
+    "defs": frozenset(),
+    "lineargradient": frozenset({"id", "x1", "y1", "x2", "y2"}),
+    "stop": frozenset({"offset", "stop-color", "stop-opacity"}),
+    "rect": frozenset({"width", "height", "rx", "fill"}),
+    "title": frozenset(),
+    "desc": frozenset(),
     "g": frozenset({"fill", "stroke-linecap", "font-family", "font-size", "opacity"}),
     "text": frozenset({
         "x", "y", "font-family", "font-size", "font-weight", "fill", "letter-spacing", "opacity",
@@ -55,10 +62,7 @@ BANNER_ATTRIBUTES = {
 }
 # Elements the clearance model reads or that carry no glyph geometry; any other
 # element (use, textPath, image, foreignObject, ...) could place text unmodeled.
-BANNER_ELEMENTS = frozenset({
-    "svg", "title", "desc", "defs", "lineargradient", "stop", "rect", "g", "text", "tspan",
-    "path",
-})
+BANNER_ELEMENTS = frozenset(BANNER_ATTRIBUTES)
 
 # Answer values the bestpractices.dev autofill file accepts per criterion.
 STATUS_VALUES = frozenset({"Met", "Unmet", "N/A", "?"})
@@ -110,8 +114,8 @@ class MarkdownTooLarge(ValueError):
     """A Markdown file is larger than MAX_MARKDOWN_BYTES."""
 
 
-def _html_targets(fragment):
-    """Return the (target, is_image) pairs of one raw HTML fragment.
+def _html_targets(fragment, *, hyperlinks_only=False):
+    """Return HTML target/type pairs, optionally restricted to anchor hrefs.
 
     Each fragment gets its own parser, closed at the end, so an unfinished
     tag in one fragment cannot join the text of the next.
@@ -119,7 +123,9 @@ def _html_targets(fragment):
     parser = _LinkHTMLParser()
     parser.feed(fragment)
     parser.close()
-    return parser.drain()
+    # Targets are bounded by the caller's finite Markdown input.
+    return [(target, is_image) for target, is_image in parser.drain()
+            if not hyperlinks_only or not is_image]
 
 
 def check_label(entry, index):
@@ -275,37 +281,33 @@ def check_test_policy(text):
     return [f"README.md: test policy lacks {fragment!r}" for fragment in TEST_POLICY_FRAGMENTS if fragment not in collapsed]
 
 
-def _extract_targets(text):
-    """Return all targets in document order and the set of image targets."""
+def _token_targets(token, *, hyperlinks_only):
+    """Return typed targets from one Markdown token using shared HTML parsing."""
+    if token.type == "link_open":
+        href = token.attrGet("href")
+        return [(href, False)] if href else []
+    if token.type == "image" and not hyperlinks_only:
+        src = token.attrGet("src")
+        return [(src, True)] if src else []
+    if token.type in {"html_block", "html_inline"} and token.content:
+        return _html_targets(token.content, hyperlinks_only=hyperlinks_only)
+    return []
+
+
+def _extract_targets(text, *, hyperlinks_only=False):
+    """Return targets in document order, optionally restricted to hyperlinks."""
     env = {}
     tokens = MarkdownIt("commonmark").enable("table").parse(text, env)
-    targets = []
-    image_targets = set()
-    # Token loops are bounded by MAX_MARKDOWN_BYTES since MarkdownIt parses
-    # a finite input string whose length is capped prior to parsing.
+    targets, image_targets = [], set()
+    # Token and target loops are bounded by MAX_MARKDOWN_BYTES in callers.
     for block in tokens:
-        if block.type == "html_block" and block.content:
-            for target, is_image in _html_targets(block.content):
+        for token in (block, *(block.children or [])):
+            for target, is_image in _token_targets(token, hyperlinks_only=hyperlinks_only):
                 targets.append(target)
                 if is_image:
                     image_targets.add(target)
-        for token in block.children or []:
-            if token.type == "link_open":
-                href = token.attrGet("href")
-                if href:
-                    targets.append(href)
-            elif token.type == "image":
-                src = token.attrGet("src")
-                if src:
-                    targets.append(src)
-                    image_targets.add(src)
-            elif token.type == "html_inline" and token.content:
-                for target, is_image in _html_targets(token.content):
-                    targets.append(target)
-                    if is_image:
-                        image_targets.add(target)
-    references = env.get("references", {})
-    for label in sorted(references):
+    references = {} if hyperlinks_only else env.get("references", {})
+    for label in sorted(references):  # Also bounded by the finite input length.
         href = references[label].get("href")
         if href is not None:
             targets.append(href)
@@ -321,6 +323,12 @@ def link_targets(text):
     checked; comments and other tags are ignored.
     """
     targets, _ = _extract_targets(text)
+    return targets
+
+
+def hyperlink_targets(text):
+    """Return used Markdown and HTML anchor hrefs, excluding image sources."""
+    targets, _ = _extract_targets(text, hyperlinks_only=True)
     return targets
 
 
@@ -342,7 +350,7 @@ def unlisted_repositories(profile_text, owner, repositories, self_name=".github"
     if len(profile_text) > MAX_MARKDOWN_BYTES:
         raise ValueError(f"profile/README.md: more than {MAX_MARKDOWN_BYTES} characters")
     # Target count is bounded by MAX_MARKDOWN_BYTES before Markdown parsing.
-    targets = {target.removesuffix("/").casefold() for target in link_targets(profile_text)}
+    targets = {target.removesuffix("/").casefold() for target in hyperlink_targets(profile_text)}
     included = profile_repositories(repositories, self_name)
     return sorted(
         f"profile/README.md: public repository {owner}/{repository['name']} has no link"
@@ -351,17 +359,54 @@ def unlisted_repositories(profile_text, owner, repositories, self_name=".github"
     )
 
 
+def _path_coordinates(tokens, count):
+    """Read one finite coordinate group of at most six numeric tokens."""
+    # Both numeric loops have the command arity as their scalar bound (<= 6).
+    try:
+        coordinates = [float(token) for token in tokens]
+    except ValueError as error:
+        raise ValueError("wave path: missing or unpaired coordinates") from error
+    if len(coordinates) != count:
+        raise ValueError("wave path: missing or unpaired coordinates")
+    if not all(math.isfinite(number) for number in coordinates):
+        raise ValueError("wave path: coordinates must be finite")
+    return coordinates
+
+
 def _wave_start(path):
-    """Return the minimum absolute path x, refusing unsupported SVG commands."""
+    """Bound absolute M/L/C/S paths by explicit and reflected control x values."""
     if re.search(r"[^MCSL\s,]", SVG_NUMBER.sub("", path)):
         raise ValueError("wave path: only absolute M, C, S and L commands supported")
-    # Matches and coordinates are bounded by MAX_SVG_BYTES in the caller.
-    numbers = [float(number) for number in SVG_NUMBER.findall(path)]
-    if not numbers or len(numbers) % 2:
-        raise ValueError("wave path: missing or unpaired coordinates")
-    if not all(math.isfinite(number) for number in numbers):
-        raise ValueError("wave path: coordinates must be finite")
-    return min(numbers[::2])
+    tokens = re.findall(r"[MCSL]|" + SVG_NUMBER.pattern, path)
+    if not tokens or tokens[0] != "M":
+        raise ValueError("wave path: must begin with M coordinates")
+    index, command, minimum = 0, "M", math.inf
+    # Cubics stay in their control-point convex hull, including S reflections.
+    current, second_control = (0.0, 0.0), None
+    counts = {"M": 2, "L": 2, "C": 6, "S": 4}
+    # Each iteration consumes at least one coordinate group; token count is
+    # the scalar upper bound, itself bounded by MAX_SVG_BYTES in the caller.
+    for _ in range(len(tokens)):
+        if index >= len(tokens):
+            break
+        if tokens[index] in counts:
+            command = tokens[index]
+            index += 1
+        count = counts[command]
+        coordinates = _path_coordinates(tokens[index:index + count], count)
+        if command == "S":
+            reflected = current[0] if second_control is None else (
+                current[0] + (current[0] - second_control[0]))
+            if not math.isfinite(reflected):
+                raise ValueError("wave path: reflected coordinates must be finite")
+            minimum = min(minimum, reflected)
+        minimum = min(minimum, *coordinates[::2])
+        current = tuple(coordinates[-2:])
+        second_control = tuple(coordinates[-4:-2]) if command in {"C", "S"} else None
+        if command == "M":
+            command = "L"
+        index += count
+    return minimum
 
 
 def _attribute_errors(tag, attributes):
