@@ -26,23 +26,54 @@ LINK_STEP_COUNT = 5
 SHORT_CATEGORY_EXPIRIES = (("B", "2026-11-14"), ("C", "2026-11-21"))
 
 
+def load_workflow(name):
+    """Load a published workflow by filename from the workflow directory."""
+    return yaml.safe_load(
+        (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+    )
+
+
 class PublishedLinkCheckTest(unittest.TestCase):
     """Published workflows and presentation retain their regression defences."""
 
-    def test_scorecard_handles_drafts_and_merge_queue(self):
-        """Scorecard fails drafts and passes the merge queue without analysis."""
-        workflow = yaml.safe_load(
-            (ROOT / ".github/workflows/scorecard.yml").read_text(encoding="utf-8")
-        )
-        self.assertIn("merge_group", workflow.get("on", {}))
-        steps = workflow["jobs"]["analysis"]["steps"]
-        reference = yaml.safe_load(
-            (ROOT / ".github/workflows/test.yml").read_text(encoding="utf-8")
-        )
+    def assert_shared_workflow_policy(self, workflow, job_id):
+        """Assert the shared draft stop and concurrency, then return job steps."""
+        steps = workflow["jobs"][job_id]["steps"]
+        reference = load_workflow("test.yml")
         self.assertEqual(steps[0], reference["jobs"]["test"]["steps"][0])
         self.assertEqual(workflow["concurrency"], reference["concurrency"])
+        return steps
+
+    def test_shared_workflow_policy_rejects_changed_draft_stop(self):
+        """A changed draft-stop command fails the shared workflow assertion."""
+        workflow = load_workflow("links.yml")
+        workflow["jobs"]["links"]["steps"][0]["run"] = "exit 0\n"
+        with self.assertRaises(AssertionError):
+            self.assert_shared_workflow_policy(workflow, "links")
+
+    def test_shared_workflow_policy_rejects_changed_concurrency(self):
+        """A changed concurrency group fails the shared workflow assertion."""
+        workflow = load_workflow("links.yml")
+        workflow["concurrency"]["group"] += "-planted"
+        with self.assertRaises(AssertionError):
+            self.assert_shared_workflow_policy(workflow, "links")
+
+    def test_shared_workflow_policy_accepts_reference(self):
+        """The test workflow satisfies its own shared policy and returns steps."""
+        workflow = load_workflow("test.yml")
+        self.assertIs(
+            self.assert_shared_workflow_policy(workflow, "test"),
+            workflow["jobs"]["test"]["steps"],
+        )
+
+    def test_scorecard_handles_drafts_and_merge_queue(self):
+        """Scorecard fails drafts and passes the merge queue without analysis."""
+        workflow = load_workflow("scorecard.yml")
+        self.assertIn("merge_group", workflow.get("on", {}))
+        steps = self.assert_shared_workflow_policy(workflow, "analysis")
         self.assertEqual(steps[1]["if"], "github.event_name == 'merge_group'")
         self.assertIn('"$GITHUB_STEP_SUMMARY"', steps[1]["run"])
+        # Bound: at most SCORECARD_STEP_COUNT - 2 steps.
         for step in steps[2:SCORECARD_STEP_COUNT]:
             self.assertEqual(
                 step["if"],
@@ -53,9 +84,7 @@ class PublishedLinkCheckTest(unittest.TestCase):
 
     def test_links_workflow_checks_the_shared_manifest(self):
         """External links run on PRs, main and weekly with a pinned checker."""
-        workflow = yaml.safe_load(
-            (ROOT / ".github/workflows/links.yml").read_text(encoding="utf-8")
-        )
+        workflow = load_workflow("links.yml")
         triggers = workflow["on"]
         self.assertEqual(set(triggers), {
             "pull_request", "push", "schedule", "workflow_dispatch"
@@ -65,12 +94,8 @@ class PublishedLinkCheckTest(unittest.TestCase):
         # Without a paths filter the declared ruleset would require this check.
         self.assertIn("**/*.md", triggers["pull_request"]["paths"])
         self.assertIn(".lycheeignore", triggers["pull_request"]["paths"])
-        steps = workflow["jobs"]["links"]["steps"]
-        reference = yaml.safe_load(
-            (ROOT / ".github/workflows/test.yml").read_text(encoding="utf-8")
-        )
-        self.assertEqual(steps[0], reference["jobs"]["test"]["steps"][0])
-        self.assertEqual(workflow["concurrency"], reference["concurrency"])
+        steps = self.assert_shared_workflow_policy(workflow, "links")
+        # Bound: at most LINK_STEP_COUNT - 1 steps.
         for step in steps[1:LINK_STEP_COUNT]:
             self.assertEqual(step["if"], "github.event.pull_request.draft != true")
         self.assertEqual(len(steps), LINK_STEP_COUNT)
