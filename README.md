@@ -41,7 +41,8 @@ The suite checks what this repository publishes to the organisation:
 - Every relative link in the profile, the community health files and the
   decision records names a file that exists
   ([`tests/test_markdown_links.py`](tests/test_markdown_links.py)).
-- Banner text keeps at least 24 units of clearance from the wave paths
+- Banner text keeps at least 24 units of clearance from the wave paths,
+  and numbers must use plain ASCII SVG number syntax
   ([`tests/test_banner.py`](tests/test_banner.py)).
 - The profile links every public, unarchived, non-fork organisation repository
   except `.github` ([`tests/test_profile_repos.py`](tests/test_profile_repos.py)).

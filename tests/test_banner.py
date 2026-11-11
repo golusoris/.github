@@ -26,6 +26,76 @@ class BannerClearanceTest(unittest.TestCase):
         """Every text element in the published banner clears the wave."""
         self.assertEqual(check_banner_clearance(self.svg), [])
 
+    def test_non_svg_letter_spacing_is_refused(self):
+        """Python numeric extensions cannot hide an overlapping subtitle."""
+        subtitle = "Composable fx modules \u00b7 Zero-dependency clients"
+        # Four invalid spellings; each fixture stays below MAX_SVG_BYTES.
+        for spacing in ("-2_0", "-\uff12\uff10", " -20", "-20px"):
+            with self.subTest(spacing=spacing):
+                svg = self.svg.replace('<text x="350" y="76"',
+                                       f'<text x="560" y="76" letter-spacing="{spacing}"')
+                self.assertIn(f"{subtitle}: invalid letter-spacing", check_banner_clearance(svg))
+
+    def test_non_svg_font_size_is_refused(self):
+        """Underscores and Unicode digits cannot supply the title font size."""
+        # Two invalid spellings; each fixture stays below MAX_SVG_BYTES.
+        for size in ("5_6", "\uff15\uff16"):
+            with self.subTest(size=size):
+                svg = self.svg.replace('font-size="56"', f'font-size="{size}"')
+                self.assertIn("golusoris.: missing or invalid x or font-size",
+                              check_banner_clearance(svg))
+
+    def test_non_svg_x_is_refused(self):
+        """Underscores, Unicode digits and trailing dots cannot position text."""
+        # Three invalid spellings; each fixture stays below MAX_SVG_BYTES.
+        for x in ("3_50", "\uff13\uff15\uff10", "800."):
+            with self.subTest(x=x):
+                svg = self.svg.replace('x="44"', f'x="{x}"', 1)
+                self.assertIn("golusoris.: missing or invalid x or font-size",
+                              check_banner_clearance(svg))
+
+    def test_unicode_stroke_width_is_refused(self):
+        """A fullwidth digit cannot supply a wave's stroke width."""
+        svg = self.svg.replace('stroke-width="14"', 'stroke-width="\uff12"', 1)
+        self.assertIn("path: stroke-width must be a finite nonnegative plain number",
+                      check_banner_clearance(svg))
+
+    def test_non_svg_path_numbers_are_refused(self):
+        """A single fullwidth digit or trailing dot invalidates a wave path."""
+        # Two invalid spellings; each fixture stays below MAX_SVG_BYTES.
+        for number in ("\uff1800", "800."):
+            with self.subTest(number=number):
+                svg = self.svg.replace("M800", f"M{number}", 1)
+                self.assertIn("wave path: only absolute M, C, S and L commands supported",
+                              check_banner_clearance(svg))
+
+    def test_plain_svg_text_numbers_pass(self):
+        """Signed, exponent and decimal text numbers preserve clear geometry."""
+        # Six valid spellings across the three text geometry attributes.
+        for original, replacement in (
+            ('x="44"', 'x="+350"'), ('x="44"', 'x="3.5e2"'),
+            ('font-size="56"', 'font-size="56.0"'),
+            ('font-size="56"', 'font-size="5.6e1"'),
+            ('letter-spacing="-1"', 'letter-spacing="-.5"'),
+            ('letter-spacing="-1"', 'letter-spacing=".5"'),
+        ):
+            with self.subTest(replacement=replacement):
+                self.assertEqual(check_banner_clearance(
+                    self.svg.replace(original, replacement, 1)), [])
+
+    def test_plain_svg_wave_numbers_pass(self):
+        """Signed, exponent and decimal wave numbers keep the banner clear."""
+        # Seven valid spellings across path coordinates and stroke widths.
+        for original, replacement in (
+            ("M800", "M+800"), ("M800", "M8e2"), ("M800", "M800.0"),
+            ("M800", "M.8e3"), ('stroke-width="14"', 'stroke-width="0"'),
+            ('stroke-width="14"', 'stroke-width="+2"'),
+            ('stroke-width="14"', 'stroke-width="2.5e0"'),
+        ):
+            with self.subTest(replacement=replacement):
+                self.assertEqual(check_banner_clearance(
+                    self.svg.replace(original, replacement, 1)), [])
+
     def test_shadowed_uppercase_x_is_refused(self):
         """XML x cannot be hidden behind HTMLParser's case-folded X value."""
         svg = self.svg.replace('<text x="44"', '<text x="800" X="44"', 1)

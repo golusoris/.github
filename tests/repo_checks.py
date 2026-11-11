@@ -42,7 +42,8 @@ REPOSITORY_FLAGS = ("archived", "fork", "private")
 MAX_SVG_BYTES = 1_000_000
 MAX_SVG_DEPTH = 100
 
-SVG_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+# ASCII-only on purpose; a decimal point requires following digits (CSS number token).
+SVG_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 
 # Geometry-affecting attributes must be modeled before accepting them.
 BANNER_ATTRIBUTES = {
@@ -398,8 +399,17 @@ def unlisted_repositories(profile_text, owner, repositories, self_name=".github"
     )
 
 
+def _svg_number(value):
+    """Return a finite plain SVG number, refusing other attribute spellings."""
+    if not isinstance(value, str) or not SVG_NUMBER.fullmatch(value):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def _path_coordinates(tokens, count):
     """Read one finite coordinate group of at most six numeric tokens."""
+    # Tokens already come from SVG_NUMBER; float() cannot accept extra spellings.
     # Both numeric loops have the command arity as their scalar bound (<= 6).
     try:
         coordinates = [float(token) for token in tokens]
@@ -473,12 +483,9 @@ def _wave_envelope(attributes, inherited):
     cap = attributes.get("stroke-linecap", inherited.get("stroke-linecap"))
     if cap not in {None, "butt", "round"}:
         raise ValueError("path: stroke-linecap must be absent, butt or round")
-    width_text = attributes.get("stroke-width", "1")
+    width = _svg_number(attributes.get("stroke-width", "1"))
     message = "path: stroke-width must be a finite nonnegative plain number"
-    if not isinstance(width_text, str) or not SVG_NUMBER.fullmatch(width_text):
-        raise ValueError(message)
-    width = float(width_text)
-    if not math.isfinite(width) or width < 0:
+    if width is None or width < 0:
         raise ValueError(message)
     return _wave_start(attributes.get("d") or "") - width / 2
 
@@ -528,7 +535,7 @@ class _BannerParser(HTMLParser):
                 raise ValueError("SVG: nested text elements unsupported")
             self.active_text = (
                 attributes.get("x"), attributes.get("font-size", inherited.get("font-size")), [],
-                attributes.get("letter-spacing", 0),
+                attributes.get("letter-spacing", "0"),
             )
         elif tag == "path":
             try:
@@ -568,17 +575,13 @@ class _BannerParser(HTMLParser):
 def _banner_text_errors(record, wave_start, margin, advance):
     """Return missing geometry or insufficient clearance errors for one text."""
     text, x, font_size, letter_spacing = record
-    try:
-        x, font_size = float(x), float(font_size)
-    except (TypeError, ValueError):
+    x, font_size = _svg_number(x), _svg_number(font_size)
+    if x is None or font_size is None:
         return [f"{text}: missing or invalid x or font-size"]
-    if not math.isfinite(x) or not math.isfinite(font_size) or font_size <= 0:
+    if font_size <= 0:
         return [f"{text}: x and font-size must be finite; font-size must be positive"]
-    try:
-        letter_spacing = float(letter_spacing)
-    except (TypeError, ValueError):
-        return [f"{text}: invalid letter-spacing"]
-    if not math.isfinite(letter_spacing):
+    letter_spacing = _svg_number(letter_spacing)
+    if letter_spacing is None:
         return [f"{text}: invalid letter-spacing"]
     # Text length is bounded by MAX_SVG_BYTES; wide/fullwidth glyphs take two advances.
     advances = sum(2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1 for char in text)
