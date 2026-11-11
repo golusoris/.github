@@ -5,6 +5,7 @@ an empty list means the input passes. The test modules run every check
 against the real repository files and against planted defects.
 """
 
+import math
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -33,6 +34,12 @@ MAX_LABELS = 1000
 MAX_ANSWER_KEYS = 2000
 MAX_MARKDOWN_BYTES = 1_000_000
 MAX_MARKDOWN_FILES = 1000
+MAX_REPOSITORIES = 1000
+REPOSITORY_FLAGS = ("archived", "fork", "private")
+MAX_SVG_BYTES = 1_000_000
+MAX_SVG_DEPTH = 100
+
+SVG_NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
 
 # Answer values the bestpractices.dev autofill file accepts per criterion.
 STATUS_VALUES = frozenset({"Met", "Unmet", "N/A", "?"})
@@ -296,6 +303,128 @@ def link_targets(text):
     """
     targets, _ = _extract_targets(text)
     return targets
+
+
+def profile_repositories(repositories, self_name=".github"):
+    """Return public, original, active repositories within the collection bound."""
+    included = []
+    for index, repository in enumerate(repositories):
+        if index >= MAX_REPOSITORIES:
+            raise ValueError(f"more than {MAX_REPOSITORIES} repositories")
+        if repository["name"].casefold() == self_name.casefold():
+            continue
+        if not any(repository[key] for key in REPOSITORY_FLAGS):
+            included.append(repository)
+    return included
+
+
+def unlisted_repositories(profile_text, owner, repositories, self_name=".github"):
+    """Return sorted errors for public repositories without an exact root link."""
+    if len(profile_text) > MAX_MARKDOWN_BYTES:
+        raise ValueError(f"profile/README.md: more than {MAX_MARKDOWN_BYTES} characters")
+    # Target count is bounded by MAX_MARKDOWN_BYTES before Markdown parsing.
+    targets = {target.removesuffix("/").casefold() for target in link_targets(profile_text)}
+    included = profile_repositories(repositories, self_name)
+    return sorted(
+        f"profile/README.md: public repository {owner}/{repository['name']} has no link"
+        for repository in included
+        if f"https://github.com/{owner}/{repository['name']}".casefold() not in targets
+    )
+
+
+def _wave_start(path):
+    """Return the minimum absolute path x, refusing unsupported SVG commands."""
+    if re.search(r"[^MCSL\s,]", SVG_NUMBER.sub("", path)):
+        raise ValueError("wave path: only absolute M, C, S and L commands supported")
+    # Matches and coordinates are bounded by MAX_SVG_BYTES in the caller.
+    numbers = [float(number) for number in SVG_NUMBER.findall(path)]
+    if not numbers or len(numbers) % 2:
+        raise ValueError("wave path: missing or unpaired coordinates")
+    if not all(math.isfinite(number) for number in numbers):
+        raise ValueError("wave path: coordinates must be finite")
+    return min(numbers[::2])
+
+
+class _BannerParser(HTMLParser):
+    """Collect SVG text geometry and absolute paths with bounded group nesting."""
+
+    def __init__(self):
+        """Initialize text, path, error and inherited font-size buffers."""
+        super().__init__()
+        self.groups = []
+        self.active_text = None
+        self.texts = []
+        self.paths = []
+        self.errors = []
+
+    def handle_starttag(self, tag, attrs):
+        """Collect geometry and inherit font-size from the nearest group."""
+        attributes = dict(attrs)
+        inherited = self.groups[-1] if self.groups else None
+        if tag == "g":
+            if len(self.groups) >= MAX_SVG_DEPTH:
+                raise ValueError(f"SVG: group nesting exceeds {MAX_SVG_DEPTH}")
+            self.groups.append(attributes.get("font-size", inherited))
+        elif tag == "text":
+            if self.active_text is not None:
+                raise ValueError("SVG: nested text elements unsupported")
+            self.active_text = (attributes.get("x"), attributes.get("font-size", inherited), [])
+        elif tag == "path":
+            try:
+                self.paths.append(_wave_start(attributes.get("d") or ""))
+            except ValueError as error:
+                self.errors.append(str(error))
+
+    def handle_data(self, data):
+        """Keep text content, including content inside tspan elements."""
+        if self.active_text is not None:
+            self.active_text[2].append(data)
+
+    def handle_endtag(self, tag):
+        """Finish text records or pop one enclosing group."""
+        if tag == "g" and self.groups:
+            self.groups.pop()
+        elif tag == "text" and self.active_text is not None:
+            x, font_size, fragments = self.active_text
+            self.texts.append(("".join(fragments).strip(), x, font_size))
+            self.active_text = None
+
+
+def _banner_text_errors(record, wave_start, margin, advance):
+    """Return missing geometry or insufficient clearance errors for one text."""
+    text, x, font_size = record
+    try:
+        x, font_size = float(x), float(font_size)
+    except (TypeError, ValueError):
+        return [f"{text}: missing or invalid x or font-size"]
+    if not math.isfinite(x) or not math.isfinite(font_size) or font_size <= 0:
+        return [f"{text}: x and font-size must be finite; font-size must be positive"]
+    edge = x + len(text) * advance * font_size
+    if edge > wave_start - margin:
+        return [f"{text}: right edge {edge:.1f} within {margin} of wave start {wave_start:.1f}"]
+    return []
+
+
+def check_banner_clearance(svg_text, margin=24, advance=0.62):
+    """Return SVG text errors where the estimated right edge crowds a wave."""
+    if len(svg_text.encode("utf-8")) > MAX_SVG_BYTES:
+        return [f"SVG: more than {MAX_SVG_BYTES} bytes"]
+    parser = _BannerParser()
+    try:
+        parser.feed(svg_text)
+        parser.close()
+    except ValueError as error:
+        return [f"SVG: {error}"]
+    errors = parser.errors.copy()
+    if not parser.texts:
+        errors.append("SVG: no text elements")
+    if not parser.paths:
+        return errors + ["SVG: no wave paths"]
+    wave_start = min(parser.paths)
+    # Parser events and text records are bounded by MAX_SVG_BYTES.
+    for record in parser.texts:
+        errors.extend(_banner_text_errors(record, wave_start, margin, advance))
+    return errors
 
 
 def _relative_targets(path):

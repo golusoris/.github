@@ -24,19 +24,21 @@
   [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-8b5cf6?style=for-the-badge&logo=githubsponsors&logoColor=white&labelColor=111a35)](https://github.com/sponsors/lusoris)
   [![Ko-fi](https://img.shields.io/badge/Support-Ko--fi-8b5cf6?style=for-the-badge&logo=kofi&logoColor=white&labelColor=111a35)](https://ko-fi.com/lusoris)
 
-  **Foundational Go libraries and the applications built on top of them**
+  **Foundational libraries, frameworks, templates and applications**
 
   *The central [framework modules](https://github.com/golusoris/golusoris), [service clients](https://github.com/golusoris/goenvoy), and self-hosted apps of the golusoris ecosystem*
 
 </div>
 
-golusoris provides foundational Go libraries and the suite of applications built
-on top of them. It encompasses [composable framework modules covering core
-backend infrastructure](https://github.com/golusoris/golusoris) using Uber's
-[`fx`](https://github.com/uber-go/fx) dependency-injection framework,
+golusoris provides foundational libraries, frameworks and templates, and the
+applications built on top of them. It encompasses [composable Go framework
+modules covering core backend infrastructure](https://github.com/golusoris/golusoris)
+using Uber's [`fx`](https://github.com/uber-go/fx) dependency-injection framework,
 [zero-dependency typed clients for media automation and metadata
-services](https://github.com/golusoris/goenvoy), and self-hosted applications
-built on both, listed under Apps.
+services](https://github.com/golusoris/goenvoy), a [composable SvelteKit
+framework](https://github.com/golusoris/sveltesentio), a [repository template
+for native C/C++ and GPU projects](https://github.com/golusoris/template-native-gpu),
+and self-hosted applications listed under Apps.
 
 ---
 
@@ -46,6 +48,14 @@ built on both, listed under Apps.
 
 - **[golusoris/golusoris](https://github.com/golusoris/golusoris)** — the framework: composable `fx` modules covering config, logging, errors, database, HTTP, OTel, jobs, cache, auth, k8s runtime, notifications, storage, AI, and more.
 - **[golusoris/goenvoy](https://github.com/golusoris/goenvoy)** — typed clients for the *arr stack, metadata services (TMDB, AniList, Trakt, …), and download/indexer APIs. 60+ zero-dependency modules.
+- **[golusoris/sveltesentio](https://github.com/golusoris/sveltesentio)** — composable SvelteKit framework with opt-in modules, Svelte 5 runes, and production-grade foundations.
+
+### Templates
+
+- **[golusoris/template-native-gpu](https://github.com/golusoris/template-native-gpu)** — polyglot native C/C++ and GPU project template with Meson, SYCL/CUDA/HIP/Metal/Vulkan dispatch, FFmpeg filters, and supply-chain CI (SLSA, cosign, SBOM). BSD-2-Clause-Patent.
+
+This is a GitHub repository template; select **Use this template** to start a
+project from it.
 
 ### Apps
 
@@ -62,6 +72,7 @@ published yet; each will use the `app-` prefix here:
 | Prefix | Kind | Example |
 | --- | --- | --- |
 | none | library | `golusoris/goenvoy` |
+| `template-` | repository template | `golusoris/template-native-gpu` |
 | `app-` | application consuming the framework | `golusoris/app-revenge` |
 | `cmd-` | standalone CLI (future) | `golusoris/cmd-…` |
 

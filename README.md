@@ -29,6 +29,14 @@ The suite checks what this repository publishes to the organisation:
 - Every relative link in the profile, the community health files and the
   decision records names a file that exists
   ([`tests/test_markdown_links.py`](tests/test_markdown_links.py)).
+- Banner text keeps at least 24 units of clearance from the wave paths
+  ([`tests/test_banner.py`](tests/test_banner.py)).
+- The profile links every public, unarchived, non-fork organisation repository
+  except `.github` ([`tests/test_profile_repos.py`](tests/test_profile_repos.py)).
+  `make profile-repos` checks the live repository list through `gh`; the
+  [Profile workflow](.github/workflows/profile.yml) runs it on pull requests
+  that touch the profile or the checks, on `main` and weekly, so new public
+  repositories are detected even without a push here.
 
 Test policy: a change that adds a published file, or a rule for one, adds a
 test to `tests/` in the same pull request, with a passing case, a refused

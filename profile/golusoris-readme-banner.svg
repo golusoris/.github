@@ -21,11 +21,11 @@
 
   <!-- modular architecture traces: converging client and framework streams -->
   <g fill="none" stroke-linecap="round">
-    <path d="M700 78 C 780 48, 850 96, 930 70 S 1070 40, 1160 68"
+    <path d="M800 78 C 862.6 48, 917.4 96, 980 70 S 1089.6 40, 1160 68"
           stroke="url(#wave)" stroke-width="14"/>
-    <path d="M700 78 C 780 48, 850 96, 930 70 S 1070 40, 1160 68"
+    <path d="M800 78 C 862.6 48, 917.4 96, 980 70 S 1089.6 40, 1160 68"
           stroke="url(#accent)" stroke-width="2.5" opacity="0.95"/>
-    <path d="M700 84 C 780 58, 850 102, 930 78 S 1070 50, 1160 76"
+    <path d="M800 84 C 862.6 58, 917.4 102, 980 78 S 1089.6 50, 1160 76"
           stroke="#06b6d4" stroke-width="1.6" stroke-dasharray="7 9" opacity="0.6"/>
   </g>
 
