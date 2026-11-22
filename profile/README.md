@@ -23,6 +23,7 @@
   <!-- 6 support -->
   [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-8b5cf6?style=for-the-badge&logo=githubsponsors&logoColor=white&labelColor=111a35)](https://github.com/sponsors/lusoris)
   [![Ko-fi](https://img.shields.io/badge/Support-Ko--fi-8b5cf6?style=for-the-badge&logo=kofi&logoColor=white&labelColor=111a35)](https://ko-fi.com/lusoris)
+  [![Patreon](https://img.shields.io/badge/Support-Patreon-8b5cf6?style=for-the-badge&logo=patreon&logoColor=white&labelColor=111a35)](https://www.patreon.com/Lusoris)
 
   **Foundational libraries, frameworks, templates and applications**
 
@@ -91,6 +92,7 @@ infrastructure costs:
 
 - **[GitHub Sponsors](https://github.com/sponsors/lusoris)** (sponsors/lusoris)
 - **[Ko-fi](https://ko-fi.com/lusoris)** (lusoris)
+- **[Patreon](https://www.patreon.com/Lusoris)** (Lusoris)
 
 ## Upstream and licence
 
