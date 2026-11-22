@@ -1,4 +1,3 @@
-# Default funding config for all golusoris repos.
-# Repos can override by adding their own .github/FUNDING.yml.
 ko_fi: lusoris
-github: [lusoris]
+github: [Lusoris]
+patreon: Lusoris
